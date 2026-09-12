@@ -35,6 +35,7 @@ folio render --width 80 README.md | less -R   # TUIを開かずANSI出力
 folio practice                    # 内蔵の練習文で10問、1問10秒
 folio practice --count 30 --time 6   # 長め・厳しめ
 folio practice src/main.rs        # 好きなファイルで
+folio practice --strict           # 厳格な判定（既定なので省略可）
 folio practice --loose            # 緩い判定（違うキーを押しても続けられる）
 folio practice --history          # 過去の点数と型ごとの弱点
 ```

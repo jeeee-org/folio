@@ -43,8 +43,10 @@ enum Command {
         /// 1問の制限時間（秒）
         #[arg(short, long, default_value_t = 10)]
         time: u64,
-        /// 緩い判定にする（違うキーを押しても続けられ、着けばクリア。余分な打鍵で減点）。
-        /// 既定は厳格で、模範解答と違うキーを押した時点で不正解になり答えが出る
+        /// 厳格な判定（既定）。模範解答と違うキーを押した時点で不正解になり答えが出る
+        #[arg(long, conflicts_with = "loose")]
+        strict: bool,
+        /// 緩い判定にする（違うキーを押しても続けられ、着けばクリア。余分な打鍵で減点）
         #[arg(long)]
         loose: bool,
         /// 過去の成績を表示して終了する
@@ -72,6 +74,7 @@ fn main() -> Result<()> {
             path,
             count,
             time,
+            strict: _,
             loose,
             history,
         } => {
