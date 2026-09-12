@@ -15,6 +15,31 @@ folio view README.md          # TUIで読む。j/k/d/u/g/Gで移動、eでvim、
 folio render --width 80 README.md | less -R   # TUIを開かずANSI出力
 ```
 
+## 設定
+
+`~/.config/folio/config.toml`（`$XDG_CONFIG_HOME`があればその下）。無ければ既定で動き、書いた項目だけ上書きされる。以下は既定値。
+
+```toml
+[view]
+max_width = 100     # 本文の折り返しの最大幅（桁）。広い端末では余りを左右に配る
+margin = 1          # 本文の左右の余白（桁）
+
+[highlight]
+theme = "base16-ocean.dark"   # コードブロックの配色（syntectのテーマ名）
+
+[colors]            # 色名（red, lightblue, darkgray…）、256色の番号（"236"）、"#rrggbb"
+heading = ["yellow", "cyan", "green", "magenta", "white", "white"]   # 見出しレベル1〜6
+code_block_bg = "236"
+inline_code_fg = "216"
+inline_code_bg = "236"
+link = "blue"
+quote_bar = "darkgray"
+quote_text = "250"
+bullet = "cyan"
+rule = "darkgray"
+table_border = "darkgray"
+```
+
 ## yaziとの連携
 
 `~/.config/yazi/yazi.toml`に足す。プレビュー欄は[piper.yazi](https://github.com/yazi-rs/plugins/tree/main/piper.yazi)経由。

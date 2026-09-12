@@ -14,6 +14,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 use unicode_width::UnicodeWidthStr;
 
+use crate::config::Config;
 use crate::document;
 use crate::highlight::Highlighter;
 use crate::render::{self, Rendered, Theme};
@@ -25,21 +26,16 @@ const HANG_RESERVE: u16 = 2;
 /// 目次ペインの幅。画面の1/4か、この最小幅の広い方。
 const TOC_MIN_WIDTH: u16 = 24;
 
-/// 本文の折り返しの最大幅（桁）。広い端末では余りを左右に配って中央の列に収める。
-const DEFAULT_MAX_WIDTH: u16 = 100;
-
-/// 本文の左右の余白（桁）。
-const DEFAULT_MARGIN: u16 = 1;
-
 /// `folio render <path>`の本体。TUIを開かず、ANSI付きの行を標準出力に流す。
 /// yaziのプレビュー欄（piper経由）や`less -R`から使う。
-pub fn render_to_stdout(path: &Path, width: u16) -> Result<()> {
+pub fn render_to_stdout(path: &Path, width: u16, config: &Config) -> Result<()> {
     use std::io::Write;
     let source =
         fs::read_to_string(path).with_context(|| format!("{}を読めません", path.display()))?;
     let blocks = document::parse(&source);
-    let rendered =
-        render::render_with(&blocks, width, &Theme::default(), Some(&Highlighter::new()));
+    let theme = config.theme()?;
+    let highlighter = Highlighter::with_theme(&config.highlight.theme);
+    let rendered = render::render_with(&blocks, width, &theme, Some(&highlighter));
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     for line in &rendered.lines {
         // 受け側が閉じたら（プレビューの打ち切りなど）静かに終える
@@ -52,10 +48,10 @@ pub fn render_to_stdout(path: &Path, width: u16) -> Result<()> {
 }
 
 /// `folio view <path>`の本体。ファイルを読み、閉じるまでターミナルを占有する。
-pub fn run(path: &Path) -> Result<()> {
+pub fn run(path: &Path, config: &Config) -> Result<()> {
     let source =
         fs::read_to_string(path).with_context(|| format!("{}を読めません", path.display()))?;
-    let mut app = App::new(path, &source);
+    let mut app = App::new(path, &source, config)?;
     let mut terminal = ratatui::init();
     let result = app.run(&mut terminal);
     ratatui::restore();
@@ -106,14 +102,14 @@ struct Search {
 }
 
 impl App {
-    fn new(path: &Path, source: &str) -> Self {
-        Self {
+    fn new(path: &Path, source: &str, config: &Config) -> Result<Self> {
+        Ok(Self {
             path: path.to_path_buf(),
             blocks: document::parse(source),
             rendered: Rendered::default(),
             rendered_width: 0,
-            theme: Theme::default(),
-            highlighter: Highlighter::new(),
+            theme: config.theme()?,
+            highlighter: Highlighter::with_theme(&config.highlight.theme),
             scroll: 0,
             page_height: 1,
             quit: false,
@@ -122,11 +118,11 @@ impl App {
             toc_cursor: 0,
             pending_key: None,
             screen_width: 0,
-            max_width: DEFAULT_MAX_WIDTH,
-            margin: DEFAULT_MARGIN,
+            max_width: config.view.max_width,
+            margin: config.view.margin,
             input: None,
             search: None,
-        }
+        })
     }
 
     /// ファイルを読み直す。失敗したら前の内容を残し、ステータス行で知らせる。
@@ -526,7 +522,7 @@ mod tests {
     use ratatui::crossterm::event::KeyEvent;
 
     fn app(source: &str) -> App {
-        let mut app = App::new(Path::new("test.md"), source);
+        let mut app = App::new(Path::new("test.md"), source, &Config::default()).unwrap();
         app.ensure_rendered(40);
         app.page_height = 10;
         app
@@ -573,7 +569,7 @@ mod tests {
             "word ".repeat(60),
             "word ".repeat(60)
         );
-        let mut app = App::new(Path::new("t.md"), &source);
+        let mut app = App::new(Path::new("t.md"), &source, &Config::default()).unwrap();
         app.ensure_rendered(40);
         app.scroll = app.rendered.headings[1].line + 2;
         app.ensure_rendered(20);

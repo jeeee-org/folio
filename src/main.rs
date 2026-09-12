@@ -30,13 +30,14 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let config = folio::config::Config::load()?;
     match cli.command {
-        Command::View { path } => folio::viewer::run(&path),
+        Command::View { path } => folio::viewer::run(&path, &config),
         Command::Render { path, width } => {
             let width = width
                 .or_else(|| std::env::var("COLUMNS").ok()?.parse().ok())
                 .unwrap_or(80);
-            folio::viewer::render_to_stdout(&path, width)
+            folio::viewer::render_to_stdout(&path, width, &config)
         }
     }
 }

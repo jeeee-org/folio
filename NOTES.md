@@ -13,6 +13,7 @@
 - 2026-09-12 マークダウン解析は`pulldown-cmark`（0.13）。イベント列を返すプル型で軽く、表・打ち消し・タスクリストの拡張が揃う。`comrak`はAST型でGFM準拠が厚いが、描画に必要なのはイベント列で足りる。
 - 2026-09-12 シンタックスハイライトは`syntect`（5.3）。Sublimeの文法で言語が広い。`tree-sitter`は言語ごとに文法を同梱ビルドする必要があり、ビューアーには重い。正規表現はC依存の`onig`でなく純Rustの`fancy-regex`（`default-fancy`）にしてビルドを単純にした（遅いが閲覧には十分）。
 - 2026-09-12 syntectの配色は`base16-ocean.dark`。テーマの背景は使わず前景色だけ取り、背景はビューアーのコードブロック色（256色の236番）で塗る。前景はRGB指定なのでtruecolor非対応の端末では近似色になる。読み込みはreleaseで1ms・debugで12msなので遅延読み込みは不要。
+- 2026-09-12 設定ファイルは`toml`＋`serde`（derive）。TOMLはyaziと同じで利用者に馴染みがあり、`#[serde(default, deny_unknown_fields)]`で「省略は既定・綴り間違いはエラー」が宣言だけで済む。色はratatuiの`Color::from_str`が色名・番号・`#rrggbb`を解釈するので自前のパーサ不要。
 - 2026-09-12 CLIは`clap`（derive）。幅計算は`unicode-width`（日本語の全角を2桁として数える。折り返しの根幹）。エラーは`anyhow`。
 
 ## ターミナル/TUIの罠
