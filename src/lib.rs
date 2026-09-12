@@ -7,8 +7,10 @@
 pub mod ansi;
 pub mod config;
 pub mod document;
+pub mod drill;
 pub mod format;
 pub mod highlight;
+pub mod practice;
 pub mod render;
 pub mod search;
 pub mod viewer;

@@ -33,6 +33,17 @@ enum Command {
         #[arg(short, long)]
         format: Option<Format>,
     },
+    /// vimの移動コマンドを時間制限つきで練習する
+    Practice {
+        /// 練習に使うテキスト（省略時は内蔵の練習文）
+        path: Option<PathBuf>,
+        /// 問題数
+        #[arg(short, long, default_value_t = 10)]
+        count: usize,
+        /// 1問の制限時間（秒）
+        #[arg(short, long, default_value_t = 10)]
+        time: u64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -49,6 +60,30 @@ fn main() -> Result<()> {
                 .or_else(|| std::env::var("COLUMNS").ok()?.parse().ok())
                 .unwrap_or(80);
             folio::viewer::render_to_stdout(&path, width, &config, format)
+        }
+        Command::Practice { path, count, time } => {
+            let settings = folio::practice::Settings {
+                count: count.max(1),
+                time_limit: std::time::Duration::from_secs(time.max(1)),
+            };
+            let weights: Vec<(folio::drill::Kind, f64)> =
+                folio::drill::Kind::ALL.iter().map(|k| (*k, 1.0)).collect();
+            match folio::practice::run(path.as_deref(), &settings, &weights)? {
+                Some(outcome) => {
+                    println!(
+                        "{} / {}点  クリア {} / {}問",
+                        outcome.score(),
+                        outcome.max_score(),
+                        outcome.cleared(),
+                        outcome.answers.len()
+                    );
+                    Ok(())
+                }
+                None => {
+                    println!("中断しました");
+                    Ok(())
+                }
+            }
         }
     }
 }
