@@ -15,7 +15,8 @@ use ratatui::{DefaultTerminal, Frame};
 use unicode_width::UnicodeWidthStr;
 
 use crate::document::{self, Block};
-use crate::render;
+use crate::highlight::Highlighter;
+use crate::render::{self, Theme};
 
 /// 折り返し幅の右に空けておく桁数（ぶら下げ句読点の逃げ場）。
 const HANG_RESERVE: u16 = 2;
@@ -34,6 +35,8 @@ struct App {
     blocks: Vec<Block>,
     lines: Vec<Line<'static>>,
     rendered_width: u16,
+    theme: Theme,
+    highlighter: Highlighter,
     scroll: usize,
     page_height: usize,
     quit: bool,
@@ -56,6 +59,8 @@ impl App {
             blocks: document::parse(&source),
             lines: Vec::new(),
             rendered_width: 0,
+            theme: Theme::default(),
+            highlighter: Highlighter::new(),
             scroll: 0,
             page_height: 1,
             quit: false,
@@ -121,7 +126,12 @@ impl App {
         // 行頭禁則でぶら下がる句読点（最大2桁）を切らないよう、折り返し幅は描画領域より2桁狭くする
         let wrap_width = body.width.saturating_sub(HANG_RESERVE);
         if wrap_width != self.rendered_width {
-            self.lines = render::render(&self.blocks, wrap_width);
+            self.lines = render::render_with(
+                &self.blocks,
+                wrap_width,
+                &self.theme,
+                Some(&self.highlighter),
+            );
             self.rendered_width = wrap_width;
         }
         self.page_height = body.height.max(1) as usize;

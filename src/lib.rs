@@ -5,5 +5,6 @@
 //! 同じ中核をそのまま呼べるようにするため（REQUIREMENTS.md「全体に効く方針」）。
 
 pub mod document;
+pub mod highlight;
 pub mod render;
 pub mod viewer;

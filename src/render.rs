@@ -8,6 +8,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::document::{Align, Block, Inline, InlineStyle, ListItem};
+use crate::highlight::Highlighter;
 
 /// 配色。P1ではハードコード（設定ファイルはバックログ）。
 #[derive(Debug, Clone)]
@@ -59,13 +60,20 @@ const MIN_WIDTH: usize = 8;
 /// 文書を`width`桁に収めた行の列にする。例外は2つ: 表は折り返さずはみ出すことがある。
 /// 行頭禁則の句読点は前の行にぶら下がり、最大2桁はみ出す。
 pub fn render(blocks: &[Block], width: u16) -> Vec<Line<'static>> {
-    render_with(blocks, width, &Theme::default())
+    render_with(blocks, width, &Theme::default(), None)
 }
 
-pub fn render_with(blocks: &[Block], width: u16, theme: &Theme) -> Vec<Line<'static>> {
+/// 配色とハイライターを指定して描く。`highlighter`が`None`ならコードは単色。
+pub fn render_with(
+    blocks: &[Block],
+    width: u16,
+    theme: &Theme,
+    highlighter: Option<&Highlighter>,
+) -> Vec<Line<'static>> {
     let mut renderer = Renderer {
         width: (width as usize).max(MIN_WIDTH),
         theme,
+        highlighter,
         lines: Vec::new(),
     };
     renderer.blocks(blocks, &Prefix::default(), false);
@@ -111,6 +119,7 @@ impl Prefix {
 struct Renderer<'t> {
     width: usize,
     theme: &'t Theme,
+    highlighter: Option<&'t Highlighter>,
     lines: Vec<Line<'static>>,
 }
 
@@ -151,7 +160,7 @@ impl Renderer<'_> {
             Block::Heading { level, inlines } => self.heading(*level, inlines, prefix),
             Block::Paragraph(inlines) => self.paragraph(inlines, prefix, Style::default()),
             Block::List { start, items } => self.list(*start, items, prefix),
-            Block::CodeBlock { code, .. } => self.code_block(code, prefix),
+            Block::CodeBlock { lang, code } => self.code_block(lang.as_deref(), code, prefix),
             Block::BlockQuote(inner) => {
                 let bar = Span::styled("▌ ", self.theme.quote_bar);
                 let child = prefix.child(bar.clone(), bar);
@@ -244,25 +253,38 @@ impl Renderer<'_> {
         }
     }
 
-    fn code_block(&mut self, code: &str, prefix: &Prefix) {
+    fn code_block(&mut self, lang: Option<&str>, code: &str, prefix: &Prefix) {
         let avail = self.avail(prefix);
-        let style = self.theme.code_block;
-        let lines: Vec<&str> = if code.is_empty() {
-            vec![""]
-        } else {
-            code.lines().collect()
+        let bg = self.theme.code_block;
+        // 言語が分かりハイライターがあれば色分けし、無ければ単色。どちらも背景で幅いっぱいに塗る
+        let highlighted = lang.and_then(|l| self.highlighter.and_then(|h| h.highlight(l, code)));
+        let lines: Vec<Vec<(Style, String)>> = match highlighted {
+            Some(lines) if !lines.is_empty() => lines,
+            _ => {
+                let raw: Vec<&str> = if code.is_empty() {
+                    vec![""]
+                } else {
+                    code.lines().collect()
+                };
+                raw.into_iter()
+                    .map(|l| vec![(Style::new(), l.to_string())])
+                    .collect()
+            }
         };
         let mut first = true;
-        for raw in lines {
-            let text = expand_tabs(raw);
-            let w = text.width();
-            let padded = if w < avail {
-                format!("{text}{}", " ".repeat(avail - w))
-            } else {
-                text
-            };
+        for segments in lines {
+            let mut spans = Vec::new();
+            let mut w = 0;
+            for (style, text) in segments {
+                let text = expand_tabs(&text);
+                w += text.width();
+                spans.push(Span::styled(text, bg.patch(style)));
+            }
+            if w < avail {
+                spans.push(Span::styled(" ".repeat(avail - w), bg));
+            }
             let p = if first { &prefix.first } else { &prefix.rest };
-            self.emit(p, vec![Span::styled(padded, style)]);
+            self.emit(p, spans);
             first = false;
         }
     }
