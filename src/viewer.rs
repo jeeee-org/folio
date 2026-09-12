@@ -17,6 +17,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::document;
 use crate::highlight::Highlighter;
 use crate::render::{self, Rendered, Theme};
+use crate::search::{self, Match};
 
 /// 折り返し幅の右に空けておく桁数（ぶら下げ句読点の逃げ場）。
 const HANG_RESERVE: u16 = 2;
@@ -81,6 +82,17 @@ struct App {
     pending_key: Option<char>,
     /// 画面全体の幅（ステータス行の右寄せに使う）
     screen_width: u16,
+    /// `/`で入力中の文字列（`None`なら入力モードでない）
+    input: Option<String>,
+    /// 確定した検索
+    search: Option<Search>,
+}
+
+struct Search {
+    query: String,
+    matches: Vec<Match>,
+    /// 今いるヒットの添字
+    current: usize,
 }
 
 impl App {
@@ -100,6 +112,8 @@ impl App {
             toc_cursor: 0,
             pending_key: None,
             screen_width: 0,
+            input: None,
+            search: None,
         }
     }
 
@@ -174,6 +188,10 @@ impl App {
         {
             self.scroll = h.line + offset;
         }
+        if let Some(s) = &mut self.search {
+            s.matches = search::find_all(&self.rendered.lines, &s.query);
+            s.current = s.current.min(s.matches.len().saturating_sub(1));
+        }
     }
 
     fn draw(&mut self, frame: &mut Frame) {
@@ -198,12 +216,40 @@ impl App {
         self.scroll = self.scroll.min(max_scroll);
         let end = (self.scroll + self.page_height).min(total);
 
-        let text = Text::from(self.rendered.lines[self.scroll..end].to_vec());
-        frame.render_widget(Paragraph::new(text), body);
+        let visible: Vec<Line<'static>> = (self.scroll..end)
+            .map(|i| self.line_with_matches(i))
+            .collect();
+        frame.render_widget(Paragraph::new(Text::from(visible)), body);
         if let Some(toc) = toc {
             self.draw_toc(frame, toc);
         }
         frame.render_widget(self.status_line(end, total), status);
+    }
+
+    /// 行にヒットの強調を重ねる。今いるヒットは反転、他は黄色の背景。
+    fn line_with_matches(&self, i: usize) -> Line<'static> {
+        let line = &self.rendered.lines[i];
+        let Some(s) = &self.search else {
+            return line.clone();
+        };
+        let ranges: Vec<(usize, usize, Style)> = s
+            .matches
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.line == i)
+            .map(|(k, m)| {
+                let style = if k == s.current {
+                    Style::new()
+                        .bg(Color::Yellow)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().bg(Color::Indexed(58)).fg(Color::White)
+                };
+                (m.start, m.end, style)
+            })
+            .collect();
+        search::highlight(line, &ranges)
     }
 
     fn draw_toc(&mut self, frame: &mut Frame, area: Rect) {
@@ -243,14 +289,26 @@ impl App {
     fn status_line(&self, end: usize, total: usize) -> Paragraph<'static> {
         let percent = (end * 100).checked_div(total).unwrap_or(100);
         let name = self.path.display().to_string();
-        let left = match &self.message {
-            Some(message) => format!(" {message}"),
-            None => format!(" {name}  {}-{end}/{total} ({percent}%)", self.scroll + 1),
+        let left = match (&self.input, &self.message, &self.search) {
+            (Some(input), _, _) => format!(" /{input}_"),
+            (_, Some(message), _) => format!(" {message}"),
+            (_, _, Some(s)) if !s.matches.is_empty() => format!(
+                " {name}  {}-{end}/{total} ({percent}%)  /{}  {}/{}件",
+                self.scroll + 1,
+                s.query,
+                s.current + 1,
+                s.matches.len()
+            ),
+            _ => format!(" {name}  {}-{end}/{total} ({percent}%)", self.scroll + 1),
         };
-        let right = if self.toc_open {
+        let right = if self.input.is_some() {
+            "Enter:検索  Esc:やめる ".to_string()
+        } else if self.toc_open {
             "j/k:選ぶ  Enter:飛ぶ  t/Esc:閉じる  q:終了 ".to_string()
+        } else if self.search.is_some() {
+            "n/N:次/前のヒット  Esc:検索解除  /:再検索  q:終了 ".to_string()
         } else {
-            "j/k d/u g/G:移動  ]]/[[:見出し  t:目次  e:編集  r:再読込  q:終了 ".to_string()
+            "j/k d/u g/G:移動  ]]/[[:見出し  t:目次  /:検索  e:編集  r:再読込  q:終了 ".to_string()
         };
         let gap = (self.screen_width as usize).saturating_sub(left.width() + right.width());
         let line = Line::from(vec![
@@ -268,6 +326,22 @@ impl App {
 
     fn key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if let Some(input) = &mut self.input {
+            match key.code {
+                KeyCode::Char('c') if ctrl => self.quit = true,
+                KeyCode::Esc => self.input = None,
+                KeyCode::Backspace => {
+                    input.pop();
+                }
+                KeyCode::Enter => {
+                    let query = self.input.take().unwrap_or_default();
+                    self.start_search(query);
+                }
+                KeyCode::Char(ch) => input.push(ch),
+                _ => {}
+            }
+            return Action::None;
+        }
         // 2打鍵（]] / [[）の処理
         if let Some(first) = self.pending_key.take() {
             match (first, key.code) {
@@ -308,9 +382,15 @@ impl App {
                 self.toc_open = true;
                 self.toc_cursor = self.current_heading().unwrap_or(0);
             }
+            KeyCode::Char('/') => self.input = Some(String::new()),
+            KeyCode::Char('n') => self.next_match(1),
+            KeyCode::Char('N') => self.next_match(-1),
             KeyCode::Char('e') => return Action::Edit,
             KeyCode::Char('r') => self.reload(),
-            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
+            KeyCode::Char('q') => self.quit = true,
+            // Escは「解除」に使い、何も解除するものが無い時だけ終了
+            KeyCode::Esc if self.search.is_some() => self.search = None,
+            KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if ctrl => self.quit = true,
             KeyCode::Char('j') | KeyCode::Down | KeyCode::Enter => self.scroll_by(1),
             KeyCode::Char('k') | KeyCode::Up => self.scroll_by(-1),
@@ -325,6 +405,53 @@ impl App {
             _ => {}
         }
         Action::None
+    }
+
+    /// 検索を確定し、画面上端以降で最初のヒットへ移る。
+    fn start_search(&mut self, query: String) {
+        if query.is_empty() {
+            self.search = None;
+            return;
+        }
+        let matches = search::find_all(&self.rendered.lines, &query);
+        if matches.is_empty() {
+            self.message = Some(format!("見つかりません: {query}"));
+            self.search = None;
+            return;
+        }
+        let current = matches
+            .iter()
+            .position(|m| m.line >= self.scroll)
+            .unwrap_or(0);
+        self.search = Some(Search {
+            query,
+            matches,
+            current,
+        });
+        self.scroll_to_current_match();
+    }
+
+    /// 次（+1）／前（-1）のヒットへ。端まで行ったら反対側へ回る。
+    fn next_match(&mut self, direction: isize) {
+        let Some(s) = &mut self.search else { return };
+        let len = s.matches.len();
+        if len == 0 {
+            return;
+        }
+        s.current = (s.current as isize + direction).rem_euclid(len as isize) as usize;
+        self.scroll_to_current_match();
+    }
+
+    /// 今いるヒットが画面に無ければ、画面の上から1/3の位置に来るよう動かす。
+    fn scroll_to_current_match(&mut self) {
+        let Some(s) = &self.search else { return };
+        let Some(m) = s.matches.get(s.current) else {
+            return;
+        };
+        let visible = self.scroll..self.scroll + self.page_height;
+        if !visible.contains(&m.line) {
+            self.scroll = m.line.saturating_sub(self.page_height / 3);
+        }
     }
 
     fn scroll_by(&mut self, delta: isize) {
@@ -424,6 +551,58 @@ mod tests {
         app.scroll = app.rendered.headings[1].line + 2;
         app.ensure_rendered(20);
         assert_eq!(app.scroll, app.rendered.headings[1].line + 2);
+    }
+
+    fn type_str(app: &mut App, s: &str) {
+        for ch in s.chars() {
+            press(app, ch);
+        }
+    }
+
+    #[test]
+    fn slash_searches_and_n_cycles_with_wraparound() {
+        let mut app = app("x\n\nfoo\n\ny\n\nfoo bar\n\nfoo\n");
+        press(&mut app, '/');
+        type_str(&mut app, "foo");
+        app.key(KeyEvent::from(KeyCode::Enter));
+        let s = app.search.as_ref().unwrap();
+        assert_eq!(s.matches.len(), 3);
+        assert_eq!(s.current, 0);
+        press(&mut app, 'n');
+        assert_eq!(app.search.as_ref().unwrap().current, 1);
+        press(&mut app, 'n');
+        press(&mut app, 'n');
+        assert_eq!(app.search.as_ref().unwrap().current, 0);
+        press(&mut app, 'N');
+        assert_eq!(app.search.as_ref().unwrap().current, 2);
+        app.key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.search.is_none());
+        assert!(!app.quit);
+    }
+
+    #[test]
+    fn search_moves_view_to_offscreen_hit() {
+        let body: String = (0..40).map(|i| format!("line {i}\n\n")).collect();
+        let mut app = app(&body);
+        press(&mut app, '/');
+        type_str(&mut app, "line 30");
+        app.key(KeyEvent::from(KeyCode::Enter));
+        let m = app.search.as_ref().unwrap().matches[0];
+        assert!(app.scroll <= m.line && m.line < app.scroll + app.page_height);
+    }
+
+    #[test]
+    fn no_hit_shows_message_and_esc_cancels_input() {
+        let mut app = app("abc\n");
+        press(&mut app, '/');
+        type_str(&mut app, "zzz");
+        app.key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.search.is_none());
+        assert!(app.message.as_deref().unwrap().contains("zzz"));
+        press(&mut app, '/');
+        type_str(&mut app, "ab");
+        app.key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.input.is_none() && app.search.is_none() && !app.quit);
     }
 
     #[test]
