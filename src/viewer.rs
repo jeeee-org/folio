@@ -16,6 +16,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::config::Config;
 use crate::document;
+use crate::format::Format;
 use crate::highlight::Highlighter;
 use crate::render::{self, Options, Rendered, Theme};
 use crate::search::{self, Match};
@@ -28,13 +29,18 @@ const TOC_MIN_WIDTH: u16 = 24;
 
 /// `folio render <path>`の本体。TUIを開かず、ANSI付きの行を標準出力に流す。
 /// yaziのプレビュー欄（piper経由）や`less -R`から使う。
-pub fn render_to_stdout(path: &Path, width: u16, config: &Config) -> Result<()> {
+pub fn render_to_stdout(
+    path: &Path,
+    width: u16,
+    config: &Config,
+    format: Option<Format>,
+) -> Result<()> {
     use std::io::Write;
-    let source =
-        fs::read_to_string(path).with_context(|| format!("{}を読めません", path.display()))?;
-    let blocks = document::parse(&source);
+    let source = read(path)?;
     let theme = config.theme()?;
     let highlighter = Highlighter::with_theme(&config.highlight.theme);
+    let format = format.unwrap_or_else(|| Format::detect(path, |e| highlighter.supports(e)));
+    let blocks = format.parse(path, &source);
     let rendered = render::render_with(
         &blocks,
         width,
@@ -54,14 +60,24 @@ pub fn render_to_stdout(path: &Path, width: u16, config: &Config) -> Result<()> 
 }
 
 /// `folio view <path>`の本体。ファイルを読み、閉じるまでターミナルを占有する。
-pub fn run(path: &Path, config: &Config) -> Result<()> {
-    let source =
-        fs::read_to_string(path).with_context(|| format!("{}を読めません", path.display()))?;
-    let mut app = App::new(path, &source, config)?;
+pub fn run(path: &Path, config: &Config, format: Option<Format>) -> Result<()> {
+    let source = read(path)?;
+    let mut app = App::new(path, &source, config, format)?;
     let mut terminal = ratatui::init();
     let result = app.run(&mut terminal);
     ratatui::restore();
     result
+}
+
+/// ファイルをUTF-8として読む。文字コードの自動判定はしない。
+fn read(path: &Path) -> Result<String> {
+    let bytes = fs::read(path).with_context(|| format!("{}を読めません", path.display()))?;
+    String::from_utf8(bytes).with_context(|| {
+        format!(
+            "{}はUTF-8ではありません（他の文字コードには未対応）",
+            path.display()
+        )
+    })
 }
 
 /// キー操作の結果のうち、ターミナルを触る必要があるもの。
@@ -72,6 +88,7 @@ enum Action {
 
 struct App {
     path: PathBuf,
+    format: Format,
     blocks: Vec<document::Block>,
     rendered: Rendered,
     rendered_width: u16,
@@ -110,14 +127,17 @@ struct Search {
 }
 
 impl App {
-    fn new(path: &Path, source: &str, config: &Config) -> Result<Self> {
+    fn new(path: &Path, source: &str, config: &Config, format: Option<Format>) -> Result<Self> {
+        let highlighter = Highlighter::with_theme(&config.highlight.theme);
+        let format = format.unwrap_or_else(|| Format::detect(path, |e| highlighter.supports(e)));
         Ok(Self {
             path: path.to_path_buf(),
-            blocks: document::parse(source),
+            format,
+            blocks: format.parse(path, source),
             rendered: Rendered::default(),
             rendered_width: 0,
             theme: config.theme()?,
-            highlighter: Highlighter::with_theme(&config.highlight.theme),
+            highlighter,
             scroll: 0,
             page_height: 1,
             quit: false,
@@ -136,9 +156,9 @@ impl App {
 
     /// ファイルを読み直す。失敗したら前の内容を残し、ステータス行で知らせる。
     fn reload(&mut self) {
-        match fs::read_to_string(&self.path) {
+        match read(&self.path) {
             Ok(source) => {
-                self.blocks = document::parse(&source);
+                self.blocks = self.format.parse(&self.path, &source);
                 self.rendered_width = 0;
             }
             Err(err) => self.message = Some(format!("再読み込みに失敗: {err}")),
@@ -547,7 +567,7 @@ mod tests {
     use ratatui::crossterm::event::KeyEvent;
 
     fn app(source: &str) -> App {
-        let mut app = App::new(Path::new("test.md"), source, &Config::default()).unwrap();
+        let mut app = App::new(Path::new("test.md"), source, &Config::default(), None).unwrap();
         app.ensure_rendered(40);
         app.page_height = 10;
         app
@@ -594,7 +614,7 @@ mod tests {
             "word ".repeat(60),
             "word ".repeat(60)
         );
-        let mut app = App::new(Path::new("t.md"), &source, &Config::default()).unwrap();
+        let mut app = App::new(Path::new("t.md"), &source, &Config::default(), None).unwrap();
         app.ensure_rendered(40);
         app.scroll = app.rendered.headings[1].line + 2;
         app.ensure_rendered(20);

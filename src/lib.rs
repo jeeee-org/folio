@@ -7,6 +7,7 @@
 pub mod ansi;
 pub mod config;
 pub mod document;
+pub mod format;
 pub mod highlight;
 pub mod render;
 pub mod search;

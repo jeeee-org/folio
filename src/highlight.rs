@@ -34,6 +34,11 @@ impl Highlighter {
         }
     }
 
+    /// その言語名・拡張子を知っているか。
+    pub fn supports(&self, token: &str) -> bool {
+        self.syntaxes.find_syntax_by_token(token).is_some()
+    }
+
     /// 言語名を解決できたら、行ごとの装飾付き断片を返す。解決できなければ`None`。
     /// 言語名は`rust`のほかに`rs`のような拡張子や`Rust`のような表記も受け付ける。
     pub fn highlight(&self, lang: &str, code: &str) -> Option<Vec<Vec<(Style, String)>>> {
