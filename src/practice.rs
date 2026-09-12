@@ -21,6 +21,8 @@ use crate::vim::{Key, Vim};
 pub struct Settings {
     pub count: usize,
     pub time_limit: Duration,
+    /// 厳格モード。模範解答（と同等の別解）以外のキーを押した時点で不正解にする
+    pub strict: bool,
 }
 
 /// 1問の結果。
@@ -30,6 +32,8 @@ pub struct Answer {
     pub prompt: String,
     pub answer: String,
     pub cleared: bool,
+    /// 厳格モードで違うキーを押して終わった（`cleared`が偽の時だけ意味がある）。打ったキーを持つ
+    pub wrong: Option<String>,
     pub seconds: f64,
     pub keys: usize,
     pub optimal: usize,
@@ -85,8 +89,12 @@ pub fn run(
 
 /// 画面の段階。
 enum Phase {
-    /// 出題中（制限時間が進む）
-    Asking { started: Instant, keys: usize },
+    /// 出題中（制限時間が進む）。`typed`は厳格モードの照合用
+    Asking {
+        started: Instant,
+        keys: usize,
+        typed: String,
+    },
     /// 1問の結果を見せている（少し待つか、キーで次へ）
     Feedback { until: Instant, last: Answer },
     /// 全問終了のまとめ
@@ -130,6 +138,7 @@ impl<'a> Session<'a> {
             phase: Phase::Asking {
                 started: Instant::now(),
                 keys: 0,
+                typed: String::new(),
             },
             outcome: Outcome {
                 answers: Vec::new(),
@@ -165,10 +174,10 @@ impl<'a> Session<'a> {
     /// 時間経過で進む処理（時間切れ・結果表示の終了）。
     fn tick(&mut self) {
         match &self.phase {
-            Phase::Asking { started, keys } => {
+            Phase::Asking { started, keys, .. } => {
                 if started.elapsed() >= self.settings.time_limit {
                     let keys = *keys;
-                    self.finish_question(false, self.settings.time_limit.as_secs_f64(), keys);
+                    self.finish_question(false, None, self.settings.time_limit.as_secs_f64(), keys);
                 }
             }
             Phase::Feedback { until, .. } => {
@@ -187,14 +196,25 @@ impl<'a> Session<'a> {
             return;
         }
         match &mut self.phase {
-            Phase::Asking { started, keys } => {
+            Phase::Asking {
+                started,
+                keys,
+                typed,
+            } => {
                 let Some(vk) = to_vim_key(key) else { return };
                 *keys += 1;
+                typed.push_str(&key_text(vk));
+                let secs = started.elapsed().as_secs_f64();
+                let keys = *keys;
+                // 厳格モード: 模範解答の途中から外れた時点で不正解
+                if self.settings.strict && !self.question.accepts_prefix(typed) {
+                    let typed = typed.clone();
+                    self.finish_question(false, Some(typed), secs, keys);
+                    return;
+                }
                 self.vim.input(vk);
                 if self.vim.pos() == self.question.target {
-                    let secs = started.elapsed().as_secs_f64();
-                    let keys = *keys;
-                    self.finish_question(true, secs, keys);
+                    self.finish_question(true, None, secs, keys);
                 }
             }
             Phase::Feedback { .. } => self.next_question(),
@@ -206,12 +226,13 @@ impl<'a> Session<'a> {
         }
     }
 
-    fn finish_question(&mut self, cleared: bool, seconds: f64, keys: usize) {
+    fn finish_question(&mut self, cleared: bool, wrong: Option<String>, seconds: f64, keys: usize) {
         let answer = Answer {
             kind: self.question.kind,
             prompt: self.question.prompt.clone(),
             answer: self.question.answer_display(),
             cleared,
+            wrong: wrong.map(|t| t.replace('\n', "⏎")),
             seconds,
             keys,
             optimal: self.question.optimal_keys(),
@@ -240,6 +261,7 @@ impl<'a> Session<'a> {
         self.phase = Phase::Asking {
             started: Instant::now(),
             keys: 0,
+            typed: String::new(),
         };
     }
 
@@ -257,7 +279,7 @@ impl<'a> Session<'a> {
         self.draw_buffer(frame, body);
         self.draw_status(frame, status);
         match &self.phase {
-            Phase::Asking { started, keys } => {
+            Phase::Asking { started, keys, .. } => {
                 let remaining = self.settings.time_limit.saturating_sub(started.elapsed());
                 self.draw_question_box(frame, body, remaining, *keys);
             }
@@ -387,6 +409,8 @@ impl<'a> Session<'a> {
         frame.render_widget(Clear, area);
         let (title, color) = if last.cleared {
             (" クリア ", Color::Green)
+        } else if last.wrong.is_some() {
+            (" 不正解 ", Color::Red)
         } else {
             (" 時間切れ ", Color::Red)
         };
@@ -408,6 +432,10 @@ impl<'a> Session<'a> {
                     last.score()
                 ))
                 .centered(),
+            );
+        } else if let Some(typed) = &last.wrong {
+            lines.push(
+                Line::from(format!("打ったキー: {typed}    模範解答: {}", last.answer)).centered(),
             );
         } else {
             lines.push(Line::from(format!("模範解答: {}", last.answer)).centered());
@@ -435,6 +463,8 @@ impl<'a> Session<'a> {
             let mark = if a.cleared { "○" } else { "×" };
             let detail = if a.cleared {
                 format!("{:.1}秒 {}打鍵", a.seconds, a.keys)
+            } else if let Some(typed) = &a.wrong {
+                format!("不正解({typed})")
             } else {
                 "時間切れ".to_string()
             };
@@ -459,6 +489,17 @@ fn overlay_area(body: Rect, height: u16) -> Rect {
     let x = body.x + (body.width.saturating_sub(width)) / 2;
     let y = body.y + 1;
     Rect::new(x, y, width, height.min(body.height))
+}
+
+/// 厳格モードの照合用に、キーを模範解答と同じ表記にする（Enterは改行、Ctrlは`^d`）。
+fn key_text(key: Key) -> String {
+    match key {
+        Key::Char(c) => c.to_string(),
+        Key::Ctrl(c) => format!("^{c}"),
+        Key::Enter => "\n".to_string(),
+        Key::Esc => "\u{1b}".to_string(),
+        Key::Backspace => "\u{8}".to_string(),
+    }
 }
 
 fn to_vim_key(key: KeyEvent) -> Option<Key> {
@@ -488,6 +529,7 @@ mod tests {
             prompt: String::new(),
             answer: "3w".into(),
             cleared: true,
+            wrong: None,
             seconds: 1.0,
             keys: 2,
             optimal: 2,

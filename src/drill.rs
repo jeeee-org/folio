@@ -123,6 +123,27 @@ impl Question {
     pub fn answer_display(&self) -> String {
         self.answer.replace('\n', "⏎")
     }
+
+    /// 厳格モードで正解として受け付ける打鍵列。模範解答と、vimで同じ意味の別解。
+    pub fn accepted(&self) -> Vec<String> {
+        let mut v = vec![self.answer.clone()];
+        match self.kind {
+            // 5G と 5gg は同じ
+            Kind::GotoLine => {
+                if let Some(n) = self.answer.strip_suffix('G') {
+                    v.push(format!("{n}gg"));
+                }
+            }
+            Kind::Top => v.push("1G".into()),
+            _ => {}
+        }
+        v
+    }
+
+    /// ここまでの打鍵が、受け付ける打鍵列のどれかの先頭部分か。
+    pub fn accepts_prefix(&self, typed: &str) -> bool {
+        self.accepted().iter().any(|a| a.starts_with(typed))
+    }
 }
 
 /// 依存を増やさないための小さな乱数（xorshift64）。
@@ -486,6 +507,24 @@ mod tests {
         for _ in 0..50 {
             assert_eq!(rng.pick_weighted(&weights), Kind::Search);
         }
+    }
+
+    #[test]
+    fn strict_prefix_accepts_answer_and_equivalents_only() {
+        let q = Question {
+            kind: Kind::GotoLine,
+            prompt: String::new(),
+            start: Pos::default(),
+            target: Pos::new(4, 0),
+            answer: "5G".into(),
+        };
+        assert!(q.accepts_prefix(""));
+        assert!(q.accepts_prefix("5"));
+        assert!(q.accepts_prefix("5g"));
+        assert!(q.accepts_prefix("5gg"));
+        assert!(!q.accepts_prefix("4"));
+        assert!(!q.accepts_prefix("5j"));
+        assert!(!q.accepts_prefix("5Gj"));
     }
 
     #[test]

@@ -25,6 +25,9 @@ pub struct Record {
 pub struct AnswerRecord {
     pub kind: String,
     pub cleared: bool,
+    /// 厳格モードで違うキーを押した（古い記録には無いので省略可）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrong: Option<String>,
     pub seconds: f64,
     pub keys: usize,
     pub optimal: usize,
@@ -44,6 +47,7 @@ impl Record {
                 .map(|a| AnswerRecord {
                     kind: a.kind.name().to_string(),
                     cleared: a.cleared,
+                    wrong: a.wrong.clone(),
                     seconds: a.seconds,
                     keys: a.keys,
                     optimal: a.optimal,
@@ -256,6 +260,7 @@ mod tests {
                 .map(|(k, c, keys, opt)| AnswerRecord {
                     kind: k.into(),
                     cleared: c,
+                    wrong: None,
                     seconds: 1.0,
                     keys,
                     optimal: opt,

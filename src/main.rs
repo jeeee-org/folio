@@ -43,6 +43,10 @@ enum Command {
         /// 1問の制限時間（秒）
         #[arg(short, long, default_value_t = 10)]
         time: u64,
+        /// 緩い判定にする（違うキーを押しても続けられ、着けばクリア。余分な打鍵で減点）。
+        /// 既定は厳格で、模範解答と違うキーを押した時点で不正解になり答えが出る
+        #[arg(long)]
+        loose: bool,
         /// 過去の成績を表示して終了する
         #[arg(long)]
         history: bool,
@@ -68,6 +72,7 @@ fn main() -> Result<()> {
             path,
             count,
             time,
+            loose,
             history,
         } => {
             let (records, broken) = folio::history::load()?;
@@ -78,6 +83,7 @@ fn main() -> Result<()> {
             let settings = folio::practice::Settings {
                 count: count.max(1),
                 time_limit: std::time::Duration::from_secs(time.max(1)),
+                strict: !loose,
             };
             let weights = folio::history::weights(&records);
             match folio::practice::run(path.as_deref(), &settings, &weights)? {
