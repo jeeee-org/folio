@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -36,6 +37,14 @@ struct App {
     scroll: usize,
     page_height: usize,
     quit: bool,
+    /// ステータス行に出す一時的な知らせ（次のキーで消える）
+    message: Option<String>,
+}
+
+/// キー操作の結果のうち、ターミナルを触る必要があるもの。
+enum Action {
+    None,
+    Edit,
 }
 
 impl App {
@@ -50,7 +59,42 @@ impl App {
             scroll: 0,
             page_height: 1,
             quit: false,
+            message: None,
         })
+    }
+
+    /// ファイルを読み直す。失敗したら前の内容を残し、ステータス行で知らせる。
+    fn reload(&mut self) {
+        match fs::read_to_string(&self.path) {
+            Ok(source) => {
+                self.blocks = document::parse(&source);
+                self.rendered_width = 0;
+            }
+            Err(err) => self.message = Some(format!("再読み込みに失敗: {err}")),
+        }
+    }
+
+    /// TUIを抜けて`$EDITOR`（既定はvim）で開き、閉じたらTUIに戻って読み直す。
+    fn edit(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        let editor = std::env::var("VISUAL")
+            .or_else(|_| std::env::var("EDITOR"))
+            .unwrap_or_else(|_| "vim".to_string());
+        ratatui::restore();
+        // $EDITORは引数付きのこともある（`code -w`など）ので、シェルに展開させる
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(format!("{editor} \"$1\""))
+            .arg("folio")
+            .arg(&self.path)
+            .status();
+        *terminal = ratatui::init();
+        terminal.clear()?;
+        match status {
+            Ok(s) if s.success() => self.reload(),
+            Ok(s) => self.message = Some(format!("エディタが異常終了しました（{s}）")),
+            Err(err) => self.message = Some(format!("エディタを起動できません（{editor}）: {err}")),
+        }
+        Ok(())
     }
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
@@ -59,7 +103,11 @@ impl App {
             if let Event::Key(key) = event::read()?
                 && key.kind == KeyEventKind::Press
             {
-                self.key(key);
+                self.message = None;
+                match self.key(key) {
+                    Action::None => {}
+                    Action::Edit => self.edit(terminal)?,
+                }
             }
         }
         Ok(())
@@ -90,8 +138,11 @@ impl App {
     fn status_line(&self, end: usize, total: usize) -> Paragraph<'static> {
         let percent = (end * 100).checked_div(total).unwrap_or(100);
         let name = self.path.display().to_string();
-        let left = format!(" {name}  {}-{end}/{total} ({percent}%)", self.scroll + 1);
-        let right = "j/k:移動  d/u:半頁  g/G:先頭/末尾  q:終了 ".to_string();
+        let left = match &self.message {
+            Some(message) => format!(" {message}"),
+            None => format!(" {name}  {}-{end}/{total} ({percent}%)", self.scroll + 1),
+        };
+        let right = "j/k:移動  d/u:半頁  g/G:先頭/末尾  e:編集  r:再読込  q:終了 ".to_string();
         let gap = (self.rendered_width as usize + 2 + HANG_RESERVE as usize)
             .saturating_sub(left.width() + right.width());
         let line = Line::from(vec![
@@ -102,10 +153,12 @@ impl App {
         Paragraph::new(line).style(Style::new().bg(Color::Indexed(238)).fg(Color::White))
     }
 
-    fn key(&mut self, key: KeyEvent) {
+    fn key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let half = (self.page_height / 2).max(1);
         match key.code {
+            KeyCode::Char('e') => return Action::Edit,
+            KeyCode::Char('r') => self.reload(),
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if ctrl => self.quit = true,
             KeyCode::Char('j') | KeyCode::Down | KeyCode::Enter => self.scroll_by(1),
@@ -122,6 +175,7 @@ impl App {
             KeyCode::Char('G') | KeyCode::End => self.scroll = usize::MAX,
             _ => {}
         }
+        Action::None
     }
 
     fn scroll_by(&mut self, delta: isize) {
