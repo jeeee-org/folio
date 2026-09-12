@@ -57,10 +57,25 @@ impl Default for Theme {
 /// 折り返し幅がこれより狭い時は、この幅で描いてはみ出させる（0幅で無限ループしないため）。
 const MIN_WIDTH: usize = 8;
 
+/// 描画結果。行の列と、目次やジャンプに使う見出しの位置。
+#[derive(Debug, Clone, Default)]
+pub struct Rendered {
+    pub lines: Vec<Line<'static>>,
+    pub headings: Vec<Heading>,
+}
+
+/// 描画後の見出し1つ。`line`は`Rendered::lines`の添字。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Heading {
+    pub level: u8,
+    pub text: String,
+    pub line: usize,
+}
+
 /// 文書を`width`桁に収めた行の列にする。例外は2つ: 表は折り返さずはみ出すことがある。
 /// 行頭禁則の句読点は前の行にぶら下がり、最大2桁はみ出す。
 pub fn render(blocks: &[Block], width: u16) -> Vec<Line<'static>> {
-    render_with(blocks, width, &Theme::default(), None)
+    render_with(blocks, width, &Theme::default(), None).lines
 }
 
 /// 配色とハイライターを指定して描く。`highlighter`が`None`ならコードは単色。
@@ -69,18 +84,22 @@ pub fn render_with(
     width: u16,
     theme: &Theme,
     highlighter: Option<&Highlighter>,
-) -> Vec<Line<'static>> {
+) -> Rendered {
     let mut renderer = Renderer {
         width: (width as usize).max(MIN_WIDTH),
         theme,
         highlighter,
         lines: Vec::new(),
+        headings: Vec::new(),
     };
     renderer.blocks(blocks, &Prefix::default(), false);
     while renderer.lines.last().is_some_and(is_blank) {
         renderer.lines.pop();
     }
-    renderer.lines
+    Rendered {
+        lines: renderer.lines,
+        headings: renderer.headings,
+    }
 }
 
 fn is_blank(line: &Line<'_>) -> bool {
@@ -121,6 +140,7 @@ struct Renderer<'t> {
     theme: &'t Theme,
     highlighter: Option<&'t Highlighter>,
     lines: Vec<Line<'static>>,
+    headings: Vec<Heading>,
 }
 
 impl Renderer<'_> {
@@ -200,6 +220,15 @@ impl Renderer<'_> {
     }
 
     fn heading(&mut self, level: u8, inlines: &[Inline], prefix: &Prefix) {
+        self.headings.push(Heading {
+            level,
+            text: inlines
+                .iter()
+                .filter(|i| !i.is_line_break())
+                .map(|i| i.text.as_str())
+                .collect(),
+            line: self.lines.len(),
+        });
         let idx = (level.clamp(1, 6) - 1) as usize;
         let style = self.theme.heading[idx];
         let avail = self.avail(prefix);
@@ -619,6 +648,33 @@ mod tests {
     fn table_aligns_columns() {
         let lines = render(&parse("| a | bb |\n|---|---:|\n| ccc | d |"), 40);
         assert_eq!(plain(&lines), vec!["a   │ bb", "────┼───", "ccc │  d"]);
+    }
+
+    #[test]
+    fn headings_are_recorded_with_line_index() {
+        let rendered = render_with(
+            &parse("# A\n\ntext\n\n## B *c*\n"),
+            20,
+            &Theme::default(),
+            None,
+        );
+        assert_eq!(
+            rendered.headings,
+            vec![
+                Heading {
+                    level: 1,
+                    text: "A".into(),
+                    line: 0
+                },
+                // 見出しの下の罫線1行を挟んで: A, ━, 空, text, 空, B
+                Heading {
+                    level: 2,
+                    text: "B c".into(),
+                    line: 5
+                },
+            ]
+        );
+        assert_eq!(plain(&rendered.lines)[5], "B c");
     }
 
     #[test]
