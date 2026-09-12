@@ -12,3 +12,4 @@ pub mod highlight;
 pub mod render;
 pub mod search;
 pub mod viewer;
+pub mod vim;
