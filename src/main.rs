@@ -43,6 +43,9 @@ enum Command {
         /// 1問の制限時間（秒）
         #[arg(short, long, default_value_t = 10)]
         time: u64,
+        /// 過去の成績を表示して終了する
+        #[arg(long)]
+        history: bool,
     },
 }
 
@@ -61,26 +64,38 @@ fn main() -> Result<()> {
                 .unwrap_or(80);
             folio::viewer::render_to_stdout(&path, width, &config, format)
         }
-        Command::Practice { path, count, time } => {
+        Command::Practice {
+            path,
+            count,
+            time,
+            history,
+        } => {
+            let (records, broken) = folio::history::load()?;
+            if history {
+                print!("{}", folio::history::report(&records, broken));
+                return Ok(());
+            }
             let settings = folio::practice::Settings {
                 count: count.max(1),
                 time_limit: std::time::Duration::from_secs(time.max(1)),
             };
-            let weights: Vec<(folio::drill::Kind, f64)> =
-                folio::drill::Kind::ALL.iter().map(|k| (*k, 1.0)).collect();
+            let weights = folio::history::weights(&records);
             match folio::practice::run(path.as_deref(), &settings, &weights)? {
                 Some(outcome) => {
+                    let record = folio::history::Record::from_outcome(&outcome);
+                    let saved = folio::history::append(&record)?;
                     println!(
-                        "{} / {}点  クリア {} / {}問",
+                        "{} / {}点  クリア {} / {}問  → {}に記録（`folio practice --history`で振り返り）",
                         outcome.score(),
                         outcome.max_score(),
                         outcome.cleared(),
-                        outcome.answers.len()
+                        outcome.answers.len(),
+                        saved.display()
                     );
                     Ok(())
                 }
                 None => {
-                    println!("中断しました");
+                    println!("中断しました（記録していません）");
                     Ok(())
                 }
             }

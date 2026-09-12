@@ -29,6 +29,17 @@ folio render --width 80 README.md | less -R   # TUIを開かずANSI出力
 | vimで編集／再読込 | `e`／`r` |
 | 終了 | `q`（`Esc`は解除するものが無い時だけ終了） |
 
+## vimの移動を練習する
+
+```bash
+folio practice                    # 内蔵の練習文で10問、1問10秒
+folio practice --count 30 --time 6   # 長め・厳しめ
+folio practice src/main.rs        # 好きなファイルで
+folio practice --history          # 過去の点数と型ごとの弱点
+```
+
+vim風の画面の上に問題（「3単語先の頭へ」「対応する括弧へ」「『render』を検索して移動」…）が出る。制限時間内にカーソルが目標に着けばクリア。クリア100点、模範解答より多い打鍵1つにつき10点減、時間切れ0点。出題は16種で、`h j k l`・`w b e`・`f t ; ,`・`0 ^ $`・`gg G`・`{ }`・`%`・`H M L`・`Ctrl-d/u/f/b`・`/ ? n N`・回数指定が使える。結果は`~/.local/share/folio/practice.jsonl`に残り、成績の悪い型が多めに出るようになる。`Ctrl-c`で中断（記録しない）。
+
 ## 設定
 
 `~/.config/folio/config.toml`（`$XDG_CONFIG_HOME`があればその下）。無ければ既定で動き、書いた項目だけ上書きされる。以下は既定値。
@@ -78,7 +89,7 @@ prepend_rules = [
 
 ## 状態
 
-P1（ビューアー・yazi連携・vim往復）、P2（目次・検索・表・設定）、P3（テキスト・ソースコード・CSV/TSV）まで完了。次はP4（vimコマンド練習モード）。
+P1（ビューアー・yazi連携・vim往復）、P2（目次・検索・表・設定）、P3（テキスト・ソースコード・CSV/TSV）、P4（vimの移動の練習モード）まで完了。次はP5（ファイラー本体の自作）。
 
 ## 開発
 

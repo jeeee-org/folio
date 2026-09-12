@@ -10,6 +10,7 @@ pub mod document;
 pub mod drill;
 pub mod format;
 pub mod highlight;
+pub mod history;
 pub mod practice;
 pub mod render;
 pub mod search;
