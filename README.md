@@ -11,9 +11,22 @@
 
 ```bash
 cargo install --path .        # ~/.cargo/bin/folio
-folio view README.md          # TUIで読む。j/k/d/u/g/Gで移動、]]/[[で見出し、tで目次、/で検索、lでURL表示、eでvim、qで終了
+folio view README.md          # TUIで読む
 folio render --width 80 README.md | less -R   # TUIを開かずANSI出力
 ```
+
+キーは3層。移動と検索はvim準拠、ページャ的な操作はlessと互換、アプリ操作はvimの移動キーを避ける。
+
+| 操作 | キー |
+|---|---|
+| 1行／半ページ／1ページ | `j` `k`／`d` `u`（`Ctrl-d` `Ctrl-u`）／`Space` `Ctrl-f` `Ctrl-b` |
+| 先頭／末尾 | `gg`／`G` |
+| 次／前の見出し | `]]`／`[[` |
+| 目次ペイン | `t`で開閉。中では`j` `k` `gg` `G`で選び`Enter`で飛ぶ |
+| 検索 | `/`で入力、`n` `N`で次／前、`Esc`で解除。大文字を含む時だけ大小を区別 |
+| URLの表示切替 | `U` |
+| vimで編集／再読込 | `e`／`r` |
+| 終了 | `q`（`Esc`は解除するものが無い時だけ終了） |
 
 ## 設定
 
@@ -38,7 +51,7 @@ quote_text = "250"
 bullet = "cyan"
 rule = "darkgray"
 table_border = "darkgray"
-url = "darkgray"        # lキーで表示するURL
+url = "darkgray"        # Uキーで表示するURL
 ```
 
 ## yaziとの連携

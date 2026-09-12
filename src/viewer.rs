@@ -328,7 +328,7 @@ impl App {
         } else if self.search.is_some() {
             "n/N:次/前のヒット  Esc:検索解除  /:再検索  q:終了 ".to_string()
         } else {
-            "j/k d/u g/G:移動  ]]/[[:見出し  t:目次  /:検索  l:URL  e:編集  r:再読込  q:終了 "
+            "j/k d/u gg/G:移動  ]]/[[:見出し  t:目次  /:検索  U:URL  e:編集  r:再読込  q:終了 "
                 .to_string()
         };
         let gap = (self.screen_width as usize).saturating_sub(left.width() + right.width());
@@ -374,6 +374,14 @@ impl App {
                     self.jump_heading(-1);
                     return Action::None;
                 }
+                ('g', KeyCode::Char('g')) => {
+                    if self.toc_open {
+                        self.toc_cursor = 0;
+                    } else {
+                        self.scroll = 0;
+                    }
+                    return Action::None;
+                }
                 _ => {} // 組にならなければ2打目を通常のキーとして扱う
             }
         }
@@ -381,7 +389,8 @@ impl App {
             match key.code {
                 KeyCode::Char('j') | KeyCode::Down => self.toc_move(1),
                 KeyCode::Char('k') | KeyCode::Up => self.toc_move(-1),
-                KeyCode::Char('g') | KeyCode::Home => self.toc_cursor = 0,
+                KeyCode::Char('g') => self.pending_key = Some('g'),
+                KeyCode::Home => self.toc_cursor = 0,
                 KeyCode::Char('G') | KeyCode::End => self.toc_cursor = usize::MAX,
                 KeyCode::Enter => {
                     if let Some(h) = self.rendered.headings.get(self.toc_cursor) {
@@ -403,7 +412,7 @@ impl App {
                 self.toc_open = true;
                 self.toc_cursor = self.current_heading().unwrap_or(0);
             }
-            KeyCode::Char('l') => {
+            KeyCode::Char('U') => {
                 self.options.show_urls = !self.options.show_urls;
                 self.rendered_width = 0; // 描き直す（位置は見出し基準で保たれる）
             }
@@ -425,7 +434,8 @@ impl App {
             KeyCode::Char('b') if ctrl => self.scroll_by(-(self.page_height as isize)),
             KeyCode::Char(' ') | KeyCode::PageDown => self.scroll_by(self.page_height as isize),
             KeyCode::PageUp => self.scroll_by(-(self.page_height as isize)),
-            KeyCode::Char('g') | KeyCode::Home => self.scroll = 0,
+            KeyCode::Char('g') => self.pending_key = Some('g'),
+            KeyCode::Home => self.scroll = 0,
             KeyCode::Char('G') | KeyCode::End => self.scroll = usize::MAX,
             _ => {}
         }
@@ -652,15 +662,32 @@ mod tests {
     }
 
     #[test]
-    fn l_toggles_url_display() {
+    fn shift_u_toggles_url_display() {
         let mut app = app("[a](http://x)\n");
         assert_eq!(search::plain(&app.rendered.lines[0]), "a");
-        press(&mut app, 'l');
+        press(&mut app, 'U');
         app.ensure_rendered(40);
         assert_eq!(search::plain(&app.rendered.lines[0]), "a (http://x)");
-        press(&mut app, 'l');
+        press(&mut app, 'U');
         app.ensure_rendered(40);
         assert_eq!(search::plain(&app.rendered.lines[0]), "a");
+    }
+
+    #[test]
+    fn gg_goes_to_top_and_single_g_does_not() {
+        let mut app = app(DOC);
+        app.scroll = 7;
+        press(&mut app, 'g');
+        assert_eq!(app.scroll, 7);
+        press(&mut app, 'g');
+        assert_eq!(app.scroll, 0);
+        // 目次でも同じ
+        app.scroll = 7;
+        press(&mut app, 't');
+        assert_eq!(app.toc_cursor, 1);
+        press(&mut app, 'g');
+        press(&mut app, 'g');
+        assert_eq!(app.toc_cursor, 0);
     }
 
     #[test]

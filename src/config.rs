@@ -67,7 +67,7 @@ pub struct Colors {
     pub bullet: String,
     pub rule: String,
     pub table_border: String,
-    /// `l`で表示するURLの色
+    /// `U`で表示するURLの色
     pub url: String,
 }
 
