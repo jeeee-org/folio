@@ -332,51 +332,64 @@ impl Renderer<'_> {
             return;
         }
         let cell_width = |cell: &[Inline]| cell.iter().map(|i| i.text.width()).sum::<usize>();
-        let mut widths = vec![0usize; ncols];
+        let mut natural = vec![0usize; ncols];
         for row in std::iter::once(header).chain(rows.iter().map(Vec::as_slice)) {
             for (c, cell) in row.iter().enumerate() {
-                widths[c] = widths[c].max(cell_width(cell));
+                natural[c] = natural[c].max(cell_width(cell));
             }
         }
+        let widths = fit_columns(
+            &natural,
+            self.avail(prefix).saturating_sub(SEP_WIDTH * (ncols - 1)),
+        );
         let border = self.theme.table_border;
-        let sep = Span::styled(" │ ", border);
         let empty: Vec<Inline> = Vec::new();
 
-        let row_spans = |row: &[Vec<Inline>], base: Style, theme: &Theme| -> Vec<Span<'static>> {
-            let mut spans = Vec::new();
-            for (c, col_width) in widths.iter().enumerate() {
-                if c > 0 {
-                    spans.push(sep.clone());
-                }
-                let cell = row.get(c).unwrap_or(&empty);
-                let w = cell_width(cell);
-                let pad = col_width.saturating_sub(w);
-                let (left, right) = match aligns.get(c).copied().unwrap_or(Align::Left) {
-                    Align::Left => (0, pad),
-                    Align::Right => (pad, 0),
-                    Align::Center => (pad / 2, pad - pad / 2),
-                };
-                if left > 0 {
-                    spans.push(Span::raw(" ".repeat(left)));
-                }
-                for inline in cell {
-                    if inline.is_line_break() {
-                        continue;
+        // 1行分のセル群を、セル内折り返しを含めて何行かの描画行にする（emitは呼び出し側）
+        let theme = self.theme;
+        let render_row = |row: &[Vec<Inline>], base: Style| -> Vec<Vec<Span<'static>>> {
+            let cells: Vec<Vec<Vec<Span<'static>>>> = (0..ncols)
+                .map(|c| {
+                    let cell = row.get(c).unwrap_or(&empty);
+                    wrap_inlines_opts(cell, widths[c], base, theme, false)
+                })
+                .collect();
+            let height = cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
+            (0..height)
+                .map(|k| {
+                    let mut spans = Vec::new();
+                    for c in 0..ncols {
+                        if c > 0 {
+                            spans.push(Span::styled(" │ ", border));
+                        }
+                        let line = cells[c].get(k).cloned().unwrap_or_default();
+                        let w: usize = line.iter().map(|sp| sp.content.width()).sum();
+                        let pad = widths[c].saturating_sub(w);
+                        let (left, right) = match aligns.get(c).copied().unwrap_or(Align::Left) {
+                            Align::Left => (0, pad),
+                            Align::Right => (pad, 0),
+                            Align::Center => (pad / 2, pad - pad / 2),
+                        };
+                        if left > 0 {
+                            spans.push(Span::raw(" ".repeat(left)));
+                        }
+                        spans.extend(line);
+                        if right > 0 {
+                            spans.push(Span::raw(" ".repeat(right)));
+                        }
                     }
-                    spans.push(Span::styled(
-                        inline.text.clone(),
-                        style_of(&inline.style, base, theme),
-                    ));
-                }
-                if right > 0 {
-                    spans.push(Span::raw(" ".repeat(right)));
-                }
-            }
-            spans
+                    spans
+                })
+                .collect()
         };
 
-        let head = row_spans(header, self.theme.table_header, self.theme);
-        self.emit(&prefix.first, head);
+        for (k, spans) in render_row(header, self.theme.table_header)
+            .into_iter()
+            .enumerate()
+        {
+            let p = if k == 0 { &prefix.first } else { &prefix.rest };
+            self.emit(p, spans);
+        }
         let rule: Vec<Span<'static>> = widths
             .iter()
             .enumerate()
@@ -391,10 +404,80 @@ impl Renderer<'_> {
             .collect();
         self.emit(&prefix.rest, rule);
         for row in rows {
-            let spans = row_spans(row, Style::default(), self.theme);
-            self.emit(&prefix.rest, spans);
+            for spans in render_row(row, Style::default()) {
+                self.emit(&prefix.rest, spans);
+            }
         }
     }
+}
+
+/// 表の列の区切り" │ "の幅。
+const SEP_WIDTH: usize = 3;
+/// 折り返す時に各列へ最低限残す幅。
+const MIN_COL_WIDTH: usize = 4;
+/// この幅以下の列は「短い列」として、折り返さず自然幅のまま確保する。
+const SHORT_COL_WIDTH: usize = 10;
+
+/// 列の自然幅（内容の最大幅）を`avail`に収める。収まるならそのまま。
+/// 溢れるなら、短い列は自然幅のまま確保し、残りを広い列に自然幅の比で配分する
+/// （各列に最小幅を保証）。短い列だけでも入らなければ全列を比例配分に落とす。
+fn fit_columns(natural: &[usize], avail: usize) -> Vec<usize> {
+    let n = natural.len();
+    let total: usize = natural.iter().sum();
+    if total <= avail || n == 0 {
+        return natural.to_vec();
+    }
+    if avail < n * MIN_COL_WIDTH {
+        // 最小幅すら入らない。均等にして、はみ出しは諦める
+        return vec![(avail / n).max(MIN_COL_WIDTH); n];
+    }
+    let short_total: usize = natural.iter().filter(|&&w| w <= SHORT_COL_WIDTH).sum();
+    let wide_count = natural.iter().filter(|&&w| w > SHORT_COL_WIDTH).count();
+    let keep_short = wide_count > 0 && short_total + wide_count * MIN_COL_WIDTH <= avail;
+    let (fixed, pool): (Vec<Option<usize>>, usize) = if keep_short {
+        (
+            natural
+                .iter()
+                .map(|&w| (w <= SHORT_COL_WIDTH).then_some(w))
+                .collect(),
+            avail - short_total,
+        )
+    } else {
+        (vec![None; n], avail)
+    };
+    let flex_total: usize = (0..n)
+        .filter(|&i| fixed[i].is_none())
+        .map(|i| natural[i])
+        .sum();
+    let mut widths: Vec<usize> = (0..n)
+        .map(|i| match fixed[i] {
+            Some(w) => w,
+            None => (pool * natural[i] / flex_total).max(MIN_COL_WIDTH),
+        })
+        .collect();
+    // 切り捨て・最小幅の補正でずれた分を、広い列の間で調整する
+    while widths.iter().sum::<usize>() > avail {
+        let Some(i) = (0..n)
+            .filter(|&i| fixed[i].is_none() && widths[i] > MIN_COL_WIDTH)
+            .max_by_key(|&i| widths[i])
+        else {
+            break;
+        };
+        widths[i] -= 1;
+    }
+    loop {
+        if widths.iter().sum::<usize>() >= avail {
+            break;
+        }
+        let Some(i) = (0..n)
+            .filter(|&i| fixed[i].is_none() && widths[i] < natural[i])
+            .max_by_key(|&i| natural[i] - widths[i])
+        else {
+            break;
+        };
+        widths[i] += 1;
+    }
+    widths
 }
 
 fn expand_tabs(s: &str) -> String {
@@ -492,6 +575,17 @@ fn wrap_inlines(
     base: Style,
     theme: &Theme,
 ) -> Vec<Vec<Span<'static>>> {
+    wrap_inlines_opts(inlines, avail, base, theme, true)
+}
+
+/// `allow_hang`が偽なら行頭禁則のぶら下げをせず、必ず`avail`に収める（表のセル用）。
+fn wrap_inlines_opts(
+    inlines: &[Inline],
+    avail: usize,
+    base: Style,
+    theme: &Theme,
+    allow_hang: bool,
+) -> Vec<Vec<Span<'static>>> {
     let avail = avail.max(1);
     let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
     let mut cur: Vec<Span<'static>> = Vec::new();
@@ -520,7 +614,7 @@ fn wrap_inlines(
             Token::Word(text, w, style) => {
                 let space_w = pending_space.map(|(n, _)| n).unwrap_or(0);
                 // 行頭禁則の文字（句読点・閉じ括弧）は幅を超えても前の行にぶら下げる
-                let hang = cur_w > 0 && space_w == 0 && is_no_line_start(&text);
+                let hang = allow_hang && cur_w > 0 && space_w == 0 && is_no_line_start(&text);
                 if cur_w > 0 && cur_w + space_w + w > avail && !hang {
                     lines.push(std::mem::take(&mut cur));
                     cur_w = 0;
@@ -675,6 +769,33 @@ mod tests {
             ]
         );
         assert_eq!(plain(&rendered.lines)[5], "B c");
+    }
+
+    #[test]
+    fn wide_table_wraps_cells_within_width() {
+        let md = "| 名前 | 説明 |\n|---|---|\n| folio | ターミナルで文書を読み、そのまま編集に入るための道具。 |\n";
+        let lines = render(&parse(md), 30);
+        assert!(
+            widths(&lines).iter().all(|w| *w <= 30),
+            "{:?}",
+            plain(&lines)
+        );
+        // 説明セルが複数行に割れ、名前セルは空白で埋まる
+        assert!(lines.len() > 3);
+        assert!(plain(&lines)[3].starts_with("      │ "));
+    }
+
+    #[test]
+    fn fit_columns_keeps_natural_when_it_fits_and_scales_otherwise() {
+        assert_eq!(fit_columns(&[5, 10], 20), vec![5, 10]);
+        // 短い列（10以下）は自然幅のまま、広い列が縮む
+        assert_eq!(fit_columns(&[5, 52], 27), vec![5, 22]);
+        // 広い列同士は比で配分し、合計をぴったり合わせる
+        let w = fit_columns(&[20, 40], 30);
+        assert_eq!(w.iter().sum::<usize>(), 30);
+        assert!(w[1] > w[0] && w[0] >= MIN_COL_WIDTH);
+        // 最小幅すら入らない時は均等（はみ出しは許容）
+        assert_eq!(fit_columns(&[10, 10, 10], 6), vec![4, 4, 4]);
     }
 
     #[test]
