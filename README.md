@@ -2,7 +2,7 @@
 
 ターミナルの中で文書を読み、そのまま編集に入るための道具。Rust製。
 
-まずはマークダウンを整形して表示するビューアー`folio view <path>`を作り、yaziから開いて使う。段階的に、読みやすさの作り込み・対応形式の追加・vimコマンドの練習モードを足していく。最終的にはファイラーも自作してfolio単体で完結させる予定で、それまでyaziは足場として使う。
+マークダウンを整形して表示するビューアー`folio view <path>`をyaziから開いて使う。プレーンテキスト・ソースコード（ハイライト付き）・CSV/TSV（表）も読める。段階的に、読みやすさの作り込み・対応形式の追加・vimコマンドの練習モードを足していく。最終的にはファイラーも自作してfolio単体で完結させる予定で、それまでyaziは足場として使う。
 
 - 何を作るか: [REQUIREMENTS.md](REQUIREMENTS.md)
 - 今どこにいるか: [PROGRESS.md](PROGRESS.md)
@@ -11,7 +11,8 @@
 
 ```bash
 cargo install --path .        # ~/.cargo/bin/folio
-folio view README.md          # TUIで読む
+folio view README.md          # TUIで読む。形式は拡張子で判定（md / csv / tsv / ソースコード / それ以外はテキスト）
+folio view data.txt --format csv              # 判定を上書き（markdown / code / csv / tsv / text）
 folio render --width 80 README.md | less -R   # TUIを開かずANSI出力
 ```
 
@@ -71,12 +72,13 @@ folio = [
 [open]
 prepend_rules = [
   { url = "*.md", use = ["folio", "edit"] },
+  { url = "*.{csv,tsv}", use = ["folio", "edit"] },
 ]
 ```
 
 ## 状態
 
-P1（マークダウンビューアー＋yazi連携＋vim往復）の完了条件を満たした。次は仕上げと読みやすさの作り込み（P2）。
+P1（ビューアー・yazi連携・vim往復）、P2（目次・検索・表・設定）、P3（テキスト・ソースコード・CSV/TSV）まで完了。次はP4（vimコマンド練習モード）。
 
 ## 開発
 
