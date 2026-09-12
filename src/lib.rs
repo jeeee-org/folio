@@ -5,6 +5,7 @@
 //! 同じ中核をそのまま呼べるようにするため（REQUIREMENTS.md「全体に効く方針」）。
 
 pub mod ansi;
+pub mod browser;
 pub mod config;
 pub mod document;
 pub mod drill;

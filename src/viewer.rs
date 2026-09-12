@@ -61,16 +61,52 @@ pub fn render_to_stdout(
 
 /// `folio view <path>`の本体。ファイルを読み、閉じるまでターミナルを占有する。
 pub fn run(path: &Path, config: &Config, format: Option<Format>) -> Result<()> {
-    let source = read(path)?;
-    let mut app = App::new(path, &source, config, format)?;
     let mut terminal = ratatui::init();
-    let result = app.run(&mut terminal);
+    let result = view_in(&mut terminal, path, config, format);
     ratatui::restore();
     result
 }
 
+/// 既に開いているターミナルの上でビューアーを動かし、`q`で戻る（ファイラーから使う）。
+/// 戻る時に画面を消す。
+pub fn view_in(
+    terminal: &mut DefaultTerminal,
+    path: &Path,
+    config: &Config,
+    format: Option<Format>,
+) -> Result<()> {
+    let source = read(path)?;
+    let mut app = App::new(path, &source, config, format)?;
+    let result = app.run(terminal);
+    terminal.clear()?;
+    result
+}
+
+/// TUIを抜けて`$VISUAL`/`$EDITOR`（既定はvim）で`path`を開き、閉じたらTUIに戻る。
+/// 外側の`Err`はターミナルの再初期化の失敗、内側の`Err`はエディタ側の失敗（表示用の文）。
+pub fn open_editor(terminal: &mut DefaultTerminal, path: &Path) -> Result<Result<(), String>> {
+    let editor = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vim".to_string());
+    ratatui::restore();
+    // $EDITORは引数付きのこともある（`code -w`など）ので、シェルに展開させる
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("folio")
+        .arg(path)
+        .status();
+    *terminal = ratatui::init();
+    terminal.clear()?;
+    Ok(match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("エディタが異常終了しました（{s}）")),
+        Err(err) => Err(format!("エディタを起動できません（{editor}）: {err}")),
+    })
+}
+
 /// ファイルをUTF-8として読む。文字コードの自動判定はしない。
-fn read(path: &Path) -> Result<String> {
+pub fn read(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("{}を読めません", path.display()))?;
     String::from_utf8(bytes).with_context(|| {
         format!(
@@ -167,23 +203,9 @@ impl App {
 
     /// TUIを抜けて`$EDITOR`（既定はvim）で開き、閉じたらTUIに戻って読み直す。
     fn edit(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
-        let editor = std::env::var("VISUAL")
-            .or_else(|_| std::env::var("EDITOR"))
-            .unwrap_or_else(|_| "vim".to_string());
-        ratatui::restore();
-        // $EDITORは引数付きのこともある（`code -w`など）ので、シェルに展開させる
-        let status = Command::new("sh")
-            .arg("-c")
-            .arg(format!("{editor} \"$1\""))
-            .arg("folio")
-            .arg(&self.path)
-            .status();
-        *terminal = ratatui::init();
-        terminal.clear()?;
-        match status {
-            Ok(s) if s.success() => self.reload(),
-            Ok(s) => self.message = Some(format!("エディタが異常終了しました（{s}）")),
-            Err(err) => self.message = Some(format!("エディタを起動できません（{editor}）: {err}")),
+        match open_editor(terminal, &self.path)? {
+            Ok(()) => self.reload(),
+            Err(message) => self.message = Some(message),
         }
         Ok(())
     }

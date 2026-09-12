@@ -33,6 +33,14 @@ enum Command {
         #[arg(short, long)]
         format: Option<Format>,
     },
+    /// ディレクトリを一覧し、選んだファイルをプレビューして読む（2ペイン）
+    Browse {
+        /// 開始ディレクトリ（省略時はカレント）
+        dir: Option<PathBuf>,
+        /// 終了時にいたディレクトリをこのファイルに書く（シェル連携用。yaziと同じ方式）
+        #[arg(long)]
+        cwd_file: Option<PathBuf>,
+    },
     /// vimの移動コマンドを時間制限つきで練習する
     Practice {
         /// 練習に使うテキスト（省略時は内蔵の練習文）
@@ -72,6 +80,14 @@ fn main() -> Result<()> {
                 .or_else(|| std::env::var("COLUMNS").ok()?.parse().ok())
                 .unwrap_or(80);
             folio::viewer::render_to_stdout(&path, width, &config, format)
+        }
+        Command::Browse { dir, cwd_file } => {
+            let start = dir.unwrap_or_else(|| PathBuf::from("."));
+            let cwd = folio::browser::run(&start, &config)?;
+            if let Some(file) = cwd_file {
+                std::fs::write(&file, cwd.display().to_string())?;
+            }
+            Ok(())
         }
         Command::Practice {
             path,
