@@ -25,6 +25,12 @@ const HANG_RESERVE: u16 = 2;
 /// 目次ペインの幅。画面の1/4か、この最小幅の広い方。
 const TOC_MIN_WIDTH: u16 = 24;
 
+/// 本文の折り返しの最大幅（桁）。広い端末では余りを左右に配って中央の列に収める。
+const DEFAULT_MAX_WIDTH: u16 = 100;
+
+/// 本文の左右の余白（桁）。
+const DEFAULT_MARGIN: u16 = 1;
+
 /// `folio render <path>`の本体。TUIを開かず、ANSI付きの行を標準出力に流す。
 /// yaziのプレビュー欄（piper経由）や`less -R`から使う。
 pub fn render_to_stdout(path: &Path, width: u16) -> Result<()> {
@@ -82,6 +88,10 @@ struct App {
     pending_key: Option<char>,
     /// 画面全体の幅（ステータス行の右寄せに使う）
     screen_width: u16,
+    /// 本文の折り返しの最大幅
+    max_width: u16,
+    /// 本文の左右の余白
+    margin: u16,
     /// `/`で入力中の文字列（`None`なら入力モードでない）
     input: Option<String>,
     /// 確定した検索
@@ -112,6 +122,8 @@ impl App {
             toc_cursor: 0,
             pending_key: None,
             screen_width: 0,
+            max_width: DEFAULT_MAX_WIDTH,
+            margin: DEFAULT_MARGIN,
             input: None,
             search: None,
         }
@@ -206,7 +218,9 @@ impl App {
         } else {
             (None, main)
         };
-        let body = body.inner(Margin::new(1, 0));
+        let body = body.inner(Margin::new(self.margin, 0));
+        // 広い端末では本文を最大幅の列に収め、余りは左右に均等に配る（リーダー表示）
+        let body = centered_column(body, self.max_width + HANG_RESERVE);
 
         // 行頭禁則でぶら下がる句読点（最大2桁）を切らないよう、折り返し幅は描画領域より2桁狭くする
         self.ensure_rendered(body.width.saturating_sub(HANG_RESERVE));
@@ -481,6 +495,19 @@ impl App {
     }
 }
 
+/// `area`の中に幅`max`までの列を中央に切り出す。狭ければ`area`のまま。
+fn centered_column(area: Rect, max: u16) -> Rect {
+    if area.width <= max {
+        return area;
+    }
+    let offset = (area.width - max) / 2;
+    Rect {
+        x: area.x + offset,
+        width: max,
+        ..area
+    }
+}
+
 fn current_heading(headings: &[render::Heading], scroll: usize) -> Option<usize> {
     headings.iter().rposition(|h| h.line <= scroll)
 }
@@ -603,6 +630,14 @@ mod tests {
         type_str(&mut app, "ab");
         app.key(KeyEvent::from(KeyCode::Esc));
         assert!(app.input.is_none() && app.search.is_none() && !app.quit);
+    }
+
+    #[test]
+    fn centered_column_only_shrinks_wide_areas() {
+        let area = Rect::new(2, 0, 50, 10);
+        assert_eq!(centered_column(area, 60), area);
+        let c = centered_column(area, 30);
+        assert_eq!((c.x, c.width, c.height), (12, 30, 10));
     }
 
     #[test]
