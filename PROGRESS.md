@@ -25,6 +25,7 @@ P1: マークダウンビューアー単体（`folio view <path>`）＋yazi連�
 - [x] 2026-09-12 `e`でvimに入り、閉じたら再読み込み（完了条件3） → [checkpoint](checkpoints/2026-09-12-vim往復.md)
 - [x] 2026-09-12 コードブロックの言語別ハイライト（syntect接続） → [checkpoint](checkpoints/2026-09-12-ハイライト.md)
 - [x] 2026-09-12 `folio render`とyazi連携（プレビュー欄＋Enterで開く。完了条件1・2） → [checkpoint](checkpoints/2026-09-12-yazi連携.md)
+- [x] 2026-09-12 段階の記号（P=Phase）は必ずテーマを添えて呼ぶ、と取り決め → [checkpoint](checkpoints/2026-09-12-段階の呼び方.md)
 
 ## 進行中
 
