@@ -1,7 +1,7 @@
 # 進捗
 
 > 何が終わって、何が進行中で、次に何をやるか。**このファイルは常にスリムに保つ。**
-> 範囲はREQUIREMENTS.md、学び/罠はNOTES.md、詳細ログはdocs/checkpoints/。
+> 範囲はREQUIREMENTS.md、学び/罠はNOTES.md、詳細ログはcheckpoints/。
 
 最終更新: 2026-09-12
 
@@ -17,8 +17,9 @@ P1: マークダウンビューアー単体（`folio view <path>`）＋yazi連�
 
 ## 完了
 
-- [x] 2026-09-09 PJ初期構成（cargo init・4軸ドキュメント・GitHubリポ作成） → [checkpoint](docs/checkpoints/2026-09-09.md)
-- [x] 2026-09-12 ファイラー本体の自作を方針として確定（フェーズの順番は変えず） → [checkpoint](docs/checkpoints/2026-09-12.md)
+- [x] 2026-09-09 PJ初期構成（cargo init・4軸ドキュメント・GitHubリポ作成） → [checkpoint](checkpoints/2026-09-09-初期構成.md)
+- [x] 2026-09-12 ファイラー本体の自作を方針として確定（フェーズの順番は変えず） → [checkpoint](checkpoints/2026-09-12-ファイラー自作の方針.md)
+- [x] 2026-09-12 checkpointを新ルールの置き場・命名へ移行（`checkpoints/YYYY-MM-DD-作業内容.md`） → [checkpoint](checkpoints/2026-09-12-記録置き場の移行.md)
 
 ## 進行中
 
