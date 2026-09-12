@@ -23,6 +23,8 @@ pub struct Settings {
     pub time_limit: Duration,
     /// 厳格モード。模範解答（と同等の別解）以外のキーを押した時点で不正解にする
     pub strict: bool,
+    /// 問題ボックスに模範解答も出す（見ながら打って体に入れる段階用）
+    pub show_answer: bool,
 }
 
 /// 1問の結果。
@@ -381,6 +383,11 @@ impl<'a> Session<'a> {
                 .alignment(Alignment::Center),
             prompt,
         );
+        let info_text = if self.settings.show_answer {
+            format!("答え: {}    打鍵 {keys}", self.question.answer_display())
+        } else {
+            format!("打鍵 {keys}")
+        };
         let ratio = remaining.as_secs_f64() / self.settings.time_limit.as_secs_f64().max(0.001);
         let color = if ratio > 0.5 {
             Color::Green
@@ -397,9 +404,7 @@ impl<'a> Session<'a> {
             gauge,
         );
         frame.render_widget(
-            Paragraph::new(format!("打鍵 {keys}"))
-                .dim()
-                .alignment(Alignment::Center),
+            Paragraph::new(info_text).dim().alignment(Alignment::Center),
             info,
         );
     }

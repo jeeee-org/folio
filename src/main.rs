@@ -49,6 +49,9 @@ enum Command {
         /// 緩い判定にする（違うキーを押しても続けられ、着けばクリア。余分な打鍵で減点）
         #[arg(long)]
         loose: bool,
+        /// 問題と一緒に模範解答を出す（見ながら打って体に入れる。初見の型向け）
+        #[arg(long)]
+        show: bool,
         /// 過去の成績を表示して終了する
         #[arg(long)]
         history: bool,
@@ -76,6 +79,7 @@ fn main() -> Result<()> {
             time,
             strict: _,
             loose,
+            show,
             history,
         } => {
             let (records, broken) = folio::history::load()?;
@@ -87,6 +91,7 @@ fn main() -> Result<()> {
                 count: count.max(1),
                 time_limit: std::time::Duration::from_secs(time.max(1)),
                 strict: !loose,
+                show_answer: show,
             };
             let weights = folio::history::weights(&records);
             match folio::practice::run(path.as_deref(), &settings, &weights)? {
