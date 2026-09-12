@@ -4,6 +4,7 @@
 //! `viewer`に閉じ込める。将来ファイラー本体を自作した時に、プレビュー欄が
 //! 同じ中核をそのまま呼べるようにするため（REQUIREMENTS.md「全体に効く方針」）。
 
+pub mod ansi;
 pub mod document;
 pub mod highlight;
 pub mod render;

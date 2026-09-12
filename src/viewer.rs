@@ -21,6 +21,25 @@ use crate::render::{self, Theme};
 /// 折り返し幅の右に空けておく桁数（ぶら下げ句読点の逃げ場）。
 const HANG_RESERVE: u16 = 2;
 
+/// `folio render <path>`の本体。TUIを開かず、ANSI付きの行を標準出力に流す。
+/// yaziのプレビュー欄（piper経由）や`less -R`から使う。
+pub fn render_to_stdout(path: &Path, width: u16) -> Result<()> {
+    use std::io::Write;
+    let source =
+        fs::read_to_string(path).with_context(|| format!("{}を読めません", path.display()))?;
+    let blocks = document::parse(&source);
+    let lines = render::render_with(&blocks, width, &Theme::default(), Some(&Highlighter::new()));
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    for line in &lines {
+        // 受け側が閉じたら（プレビューの打ち切りなど）静かに終える
+        if writeln!(out, "{}", crate::ansi::line_to_ansi(line)).is_err() {
+            break;
+        }
+    }
+    let _ = out.flush();
+    Ok(())
+}
+
 /// `folio view <path>`の本体。ファイルを読み、閉じるまでターミナルを占有する。
 pub fn run(path: &Path) -> Result<()> {
     let mut app = App::load(path)?;

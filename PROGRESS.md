@@ -7,14 +7,13 @@
 
 ## 現在のフェーズ
 
-P1: マークダウンビューアー単体（`folio view <path>`）＋yazi連携＋vimでの編集。仕様はREQUIREMENTS.mdの「P1の仕様」。記法の描画・ハイライト・スクロール・vim往復（完了条件3）は動く。残りはyazi連携。
+P1: マークダウンビューアー単体（`folio view <path>`）＋yazi連携＋vimでの編集。仕様はREQUIREMENTS.mdの「P1の仕様」。**完了条件3つを達成**（実ファイルの表示・yaziからEnterで開く・eでvim往復）。日常で使いながら仕上げる段。
 
 ## 次の一手 (Top 3)
 > REQUIREMENTS.mdの「やること / バックログ」から直近の分だけを取り出す。
 
-1. yaziのopener登録とプレビュー欄での利用
-2. 実ファイルで崩れを潰す（完了条件1）
-3. P1の完了判定と次フェーズの切り出し
+1. 日常で使って崩れ・違和感を拾う（表の幅超過は既知）
+2. P1を締めてP2（読みやすさの作り込み）のスコープを切る
 
 ## 完了
 
@@ -25,6 +24,7 @@ P1: マークダウンビューアー単体（`folio view <path>`）＋yazi連�
 - [x] 2026-09-12 `folio view`の最初の実装（全記法の描画・日本語折り返し・スクロール） → [checkpoint](checkpoints/2026-09-12-ビューアー最初の実装.md)
 - [x] 2026-09-12 `e`でvimに入り、閉じたら再読み込み（完了条件3） → [checkpoint](checkpoints/2026-09-12-vim往復.md)
 - [x] 2026-09-12 コードブロックの言語別ハイライト（syntect接続） → [checkpoint](checkpoints/2026-09-12-ハイライト.md)
+- [x] 2026-09-12 `folio render`とyazi連携（プレビュー欄＋Enterで開く。完了条件1・2） → [checkpoint](checkpoints/2026-09-12-yazi連携.md)
 
 ## 進行中
 
