@@ -11,7 +11,7 @@
 
 ```bash
 cargo install --path .        # ~/.cargo/bin/folio
-folio view README.md          # TUIで読む。j/k/d/u/g/Gで移動、eでvim、rで再読み込み、qで終了
+folio view README.md          # TUIで読む。j/k/d/u/g/Gで移動、]]/[[で見出し、tで目次、/で検索、lでURL表示、eでvim、qで終了
 folio render --width 80 README.md | less -R   # TUIを開かずANSI出力
 ```
 
@@ -38,6 +38,7 @@ quote_text = "250"
 bullet = "cyan"
 rule = "darkgray"
 table_border = "darkgray"
+url = "darkgray"        # lキーで表示するURL
 ```
 
 ## yaziとの連携

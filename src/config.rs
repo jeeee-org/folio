@@ -67,6 +67,8 @@ pub struct Colors {
     pub bullet: String,
     pub rule: String,
     pub table_border: String,
+    /// `l`で表示するURLの色
+    pub url: String,
 }
 
 impl Default for Colors {
@@ -84,6 +86,7 @@ impl Default for Colors {
             bullet: "cyan".into(),
             rule: "darkgray".into(),
             table_border: "darkgray".into(),
+            url: "darkgray".into(),
         }
     }
 }
@@ -145,6 +148,7 @@ impl Config {
         theme.bullet = Style::new().fg(color(&c.bullet, "colors.bullet")?);
         theme.rule = Style::new().fg(color(&c.rule, "colors.rule")?);
         theme.table_border = Style::new().fg(color(&c.table_border, "colors.table_border")?);
+        theme.url = Style::new().fg(color(&c.url, "colors.url")?);
         Ok(theme)
     }
 }

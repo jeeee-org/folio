@@ -27,6 +27,7 @@ P2（読みやすさの作り込み）: 目次・検索・広い表・最大幅�
 - [x] 2026-09-12 広い表のセル内折り返し（短い列は保ち、広い列を比例配分） → [checkpoint](checkpoints/2026-09-12-表の折り返し.md)
 - [x] 2026-09-12 折り返しの最大幅（100桁）と中央寄せ → [checkpoint](checkpoints/2026-09-12-最大幅と中央寄せ.md)
 - [x] 2026-09-12 設定ファイル`~/.config/folio/config.toml`（配色・syntectテーマ・最大幅・余白） → [checkpoint](checkpoints/2026-09-12-設定ファイル.md)
+- [x] 2026-09-12 リンクのURL表示切替（`l`） → [checkpoint](checkpoints/2026-09-12-URL表示切替.md)
 
 ## 進行中
 

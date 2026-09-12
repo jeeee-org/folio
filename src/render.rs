@@ -24,6 +24,8 @@ pub struct Theme {
     pub rule: Style,
     pub table_border: Style,
     pub table_header: Style,
+    /// `show_urls`で出すURLの色
+    pub url: Style,
 }
 
 impl Default for Theme {
@@ -50,6 +52,7 @@ impl Default for Theme {
             rule: Style::new().fg(Color::DarkGray),
             table_border: Style::new().fg(Color::DarkGray),
             table_header: bold,
+            url: Style::new().fg(Color::DarkGray),
         }
     }
 }
@@ -75,7 +78,14 @@ pub struct Heading {
 /// 文書を`width`桁に収めた行の列にする。例外は2つ: 表は折り返さずはみ出すことがある。
 /// 行頭禁則の句読点は前の行にぶら下がり、最大2桁はみ出す。
 pub fn render(blocks: &[Block], width: u16) -> Vec<Line<'static>> {
-    render_with(blocks, width, &Theme::default(), None).lines
+    render_with(blocks, width, &Theme::default(), None, &Options::default()).lines
+}
+
+/// 描き方の切り替え。配色（`Theme`）とは別に、表示の有無を持つ。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Options {
+    /// リンクの後ろにURLを薄く出す
+    pub show_urls: bool,
 }
 
 /// 配色とハイライターを指定して描く。`highlighter`が`None`ならコードは単色。
@@ -84,11 +94,13 @@ pub fn render_with(
     width: u16,
     theme: &Theme,
     highlighter: Option<&Highlighter>,
+    options: &Options,
 ) -> Rendered {
     let mut renderer = Renderer {
         width: (width as usize).max(MIN_WIDTH),
         theme,
         highlighter,
+        options: *options,
         lines: Vec::new(),
         headings: Vec::new(),
     };
@@ -139,6 +151,7 @@ struct Renderer<'t> {
     width: usize,
     theme: &'t Theme,
     highlighter: Option<&'t Highlighter>,
+    options: Options,
     lines: Vec<Line<'static>>,
     headings: Vec<Heading>,
 }
@@ -232,7 +245,14 @@ impl Renderer<'_> {
         let idx = (level.clamp(1, 6) - 1) as usize;
         let style = self.theme.heading[idx];
         let avail = self.avail(prefix);
-        let wrapped = wrap_inlines(inlines, avail, style, self.theme);
+        let wrapped = wrap_inlines_opts(
+            inlines,
+            avail,
+            style,
+            self.theme,
+            true,
+            self.options.show_urls,
+        );
         let mut first = true;
         for spans in wrapped {
             let p = if first { &prefix.first } else { &prefix.rest };
@@ -250,7 +270,14 @@ impl Renderer<'_> {
     fn paragraph(&mut self, inlines: &[Inline], prefix: &Prefix, base: Style) {
         let avail = self.avail(prefix);
         let mut first = true;
-        for spans in wrap_inlines(inlines, avail, base, self.theme) {
+        for spans in wrap_inlines_opts(
+            inlines,
+            avail,
+            base,
+            self.theme,
+            true,
+            self.options.show_urls,
+        ) {
             let p = if first { &prefix.first } else { &prefix.rest };
             self.emit(p, spans);
             first = false;
@@ -351,7 +378,7 @@ impl Renderer<'_> {
             let cells: Vec<Vec<Vec<Span<'static>>>> = (0..ncols)
                 .map(|c| {
                     let cell = row.get(c).unwrap_or(&empty);
-                    wrap_inlines_opts(cell, widths[c], base, theme, false)
+                    wrap_inlines_opts(cell, widths[c], base, theme, false, false)
                 })
                 .collect();
             let height = cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
@@ -512,13 +539,22 @@ enum Token {
     Break,
 }
 
-fn tokenize(inlines: &[Inline], base: Style, theme: &Theme) -> Vec<Token> {
+fn tokenize(inlines: &[Inline], base: Style, theme: &Theme, show_urls: bool) -> Vec<Token> {
     let mut tokens = Vec::new();
-    for inline in inlines {
+    for (idx, inline) in inlines.iter().enumerate() {
         if inline.is_line_break() {
             tokens.push(Token::Break);
             continue;
         }
+        // リンクの並び（太字などで断片が分かれていても同じURL）の最後にURLを添える
+        let url_after = match (&inline.style.link, show_urls) {
+            (Some(url), true)
+                if inlines.get(idx + 1).and_then(|n| n.style.link.as_ref()) != Some(url) =>
+            {
+                Some(url.clone())
+            }
+            _ => None,
+        };
         let style = style_of(&inline.style, base, theme);
         let mut word = String::new();
         let mut word_w = 0;
@@ -550,6 +586,11 @@ fn tokenize(inlines: &[Inline], base: Style, theme: &Theme) -> Vec<Token> {
             }
         }
         flush(&mut word, &mut word_w, &mut tokens);
+        if let Some(url) = url_after {
+            let w = url.width();
+            tokens.push(Token::Space(1, theme.url));
+            tokens.push(Token::Word(format!("({url})"), w + 2, theme.url));
+        }
     }
     tokens
 }
@@ -569,22 +610,15 @@ fn is_cjk(ch: char) -> bool {
 }
 
 /// インライン列を`avail`桁で折り返し、行ごとのスパン列にする。
-fn wrap_inlines(
-    inlines: &[Inline],
-    avail: usize,
-    base: Style,
-    theme: &Theme,
-) -> Vec<Vec<Span<'static>>> {
-    wrap_inlines_opts(inlines, avail, base, theme, true)
-}
-
 /// `allow_hang`が偽なら行頭禁則のぶら下げをせず、必ず`avail`に収める（表のセル用）。
+/// `show_urls`が真ならリンクの後ろにURLを添える。
 fn wrap_inlines_opts(
     inlines: &[Inline],
     avail: usize,
     base: Style,
     theme: &Theme,
     allow_hang: bool,
+    show_urls: bool,
 ) -> Vec<Vec<Span<'static>>> {
     let avail = avail.max(1);
     let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
@@ -599,7 +633,7 @@ fn wrap_inlines_opts(
         }
     }
 
-    for token in tokenize(inlines, base, theme) {
+    for token in tokenize(inlines, base, theme, show_urls) {
         match token {
             Token::Break => {
                 lines.push(std::mem::take(&mut cur));
@@ -751,6 +785,7 @@ mod tests {
             20,
             &Theme::default(),
             None,
+            &Options::default(),
         );
         assert_eq!(
             rendered.headings,
@@ -796,6 +831,21 @@ mod tests {
         assert!(w[1] > w[0] && w[0] >= MIN_COL_WIDTH);
         // 最小幅すら入らない時は均等（はみ出しは許容）
         assert_eq!(fit_columns(&[10, 10, 10], 6), vec![4, 4, 4]);
+    }
+
+    #[test]
+    fn show_urls_appends_url_after_link_text() {
+        let blocks = parse("see [the **doc**](http://x.y) now");
+        let off = render(&blocks, 60);
+        assert_eq!(plain(&off), vec!["see the doc now"]);
+        let on = render_with(
+            &blocks,
+            60,
+            &Theme::default(),
+            None,
+            &Options { show_urls: true },
+        );
+        assert_eq!(plain(&on.lines), vec!["see the doc (http://x.y) now"]);
     }
 
     #[test]

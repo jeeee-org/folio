@@ -17,7 +17,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::config::Config;
 use crate::document;
 use crate::highlight::Highlighter;
-use crate::render::{self, Rendered, Theme};
+use crate::render::{self, Options, Rendered, Theme};
 use crate::search::{self, Match};
 
 /// 折り返し幅の右に空けておく桁数（ぶら下げ句読点の逃げ場）。
@@ -35,7 +35,13 @@ pub fn render_to_stdout(path: &Path, width: u16, config: &Config) -> Result<()> 
     let blocks = document::parse(&source);
     let theme = config.theme()?;
     let highlighter = Highlighter::with_theme(&config.highlight.theme);
-    let rendered = render::render_with(&blocks, width, &theme, Some(&highlighter));
+    let rendered = render::render_with(
+        &blocks,
+        width,
+        &theme,
+        Some(&highlighter),
+        &Options::default(),
+    );
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     for line in &rendered.lines {
         // 受け側が閉じたら（プレビューの打ち切りなど）静かに終える
@@ -84,6 +90,8 @@ struct App {
     pending_key: Option<char>,
     /// 画面全体の幅（ステータス行の右寄せに使う）
     screen_width: u16,
+    /// 描き方の切り替え（URL表示など）
+    options: Options,
     /// 本文の折り返しの最大幅
     max_width: u16,
     /// 本文の左右の余白
@@ -118,6 +126,7 @@ impl App {
             toc_cursor: 0,
             pending_key: None,
             screen_width: 0,
+            options: Options::default(),
             max_width: config.view.max_width,
             margin: config.view.margin,
             input: None,
@@ -189,6 +198,7 @@ impl App {
             wrap_width,
             &self.theme,
             Some(&self.highlighter),
+            &self.options,
         );
         self.rendered_width = wrap_width;
         if let Some((i, offset)) = anchor
@@ -318,7 +328,8 @@ impl App {
         } else if self.search.is_some() {
             "n/N:次/前のヒット  Esc:検索解除  /:再検索  q:終了 ".to_string()
         } else {
-            "j/k d/u g/G:移動  ]]/[[:見出し  t:目次  /:検索  e:編集  r:再読込  q:終了 ".to_string()
+            "j/k d/u g/G:移動  ]]/[[:見出し  t:目次  /:検索  l:URL  e:編集  r:再読込  q:終了 "
+                .to_string()
         };
         let gap = (self.screen_width as usize).saturating_sub(left.width() + right.width());
         let line = Line::from(vec![
@@ -391,6 +402,10 @@ impl App {
             KeyCode::Char('t') => {
                 self.toc_open = true;
                 self.toc_cursor = self.current_heading().unwrap_or(0);
+            }
+            KeyCode::Char('l') => {
+                self.options.show_urls = !self.options.show_urls;
+                self.rendered_width = 0; // 描き直す（位置は見出し基準で保たれる）
             }
             KeyCode::Char('/') => self.input = Some(String::new()),
             KeyCode::Char('n') => self.next_match(1),
@@ -634,6 +649,18 @@ mod tests {
         assert_eq!(centered_column(area, 60), area);
         let c = centered_column(area, 30);
         assert_eq!((c.x, c.width, c.height), (12, 30, 10));
+    }
+
+    #[test]
+    fn l_toggles_url_display() {
+        let mut app = app("[a](http://x)\n");
+        assert_eq!(search::plain(&app.rendered.lines[0]), "a");
+        press(&mut app, 'l');
+        app.ensure_rendered(40);
+        assert_eq!(search::plain(&app.rendered.lines[0]), "a (http://x)");
+        press(&mut app, 'l');
+        app.ensure_rendered(40);
+        assert_eq!(search::plain(&app.rendered.lines[0]), "a");
     }
 
     #[test]
