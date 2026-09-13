@@ -16,6 +16,7 @@ use ratatui::{DefaultTerminal, Frame};
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::Config;
+use crate::fileops;
 use crate::format::Format;
 use crate::highlight::Highlighter;
 use crate::render::{self, Options, Theme};
@@ -182,6 +183,18 @@ struct Browser<'c> {
     pending_g: bool,
     list_height: usize,
     quit: bool,
+    /// 下部の1行で受けている入力・確認
+    prompt: Option<Prompt>,
+}
+
+/// 下部の1行で受ける入力と確認。
+enum Prompt {
+    /// 新規作成の名前
+    Create { input: String },
+    /// 改名。`path`が対象
+    Rename { path: PathBuf, input: String },
+    /// ごみ箱へ移す確認。`y`だけが実行
+    Trash { path: PathBuf, name: String },
 }
 
 impl<'c> Browser<'c> {
@@ -199,6 +212,7 @@ impl<'c> Browser<'c> {
             pending_g: false,
             list_height: 1,
             quit: false,
+            prompt: None,
         };
         b.reload(None);
         Ok(b)
@@ -241,6 +255,11 @@ impl<'c> Browser<'c> {
 
     fn key(&mut self, terminal: &mut DefaultTerminal, key: KeyEvent) -> Result<()> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.prompt.is_some() {
+            self.prompt_key(key);
+            return Ok(());
+        }
+        self.message = None;
         if self.pending_g {
             self.pending_g = false;
             if key.code == KeyCode::Char('g') {
@@ -253,12 +272,14 @@ impl<'c> Browser<'c> {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if ctrl => self.quit = true,
-            KeyCode::Char('d') if ctrl => self.scroll_preview(10),
-            KeyCode::Char('u') if ctrl => self.scroll_preview(-10),
+            KeyCode::Char('d') if ctrl => self.move_cursor(half as isize),
+            KeyCode::Char('u') if ctrl => self.move_cursor(-(half as isize)),
+            KeyCode::PageDown => self.move_cursor(half as isize),
+            KeyCode::PageUp => self.move_cursor(-(half as isize)),
+            KeyCode::Char('J') => self.scroll_preview(10),
+            KeyCode::Char('K') => self.scroll_preview(-10),
             KeyCode::Char('j') | KeyCode::Down => self.move_cursor(1),
             KeyCode::Char('k') | KeyCode::Up => self.move_cursor(-1),
-            KeyCode::Char('d') | KeyCode::PageDown => self.move_cursor(half as isize),
-            KeyCode::Char('u') | KeyCode::PageUp => self.move_cursor(-(half as isize)),
             KeyCode::Char('g') => self.pending_g = true,
             KeyCode::Char('G') | KeyCode::End => self.set_cursor(usize::MAX),
             KeyCode::Home => self.set_cursor(0),
@@ -270,13 +291,124 @@ impl<'c> Browser<'c> {
                 let keep = self.current().map(|e| e.name.clone());
                 self.reload(keep.as_deref());
             }
-            KeyCode::Char('r') => {
+            KeyCode::Char('R') => {
                 let keep = self.current().map(|e| e.name.clone());
                 self.reload(keep.as_deref());
+            }
+            // ファイル操作（yaziと同じキー）
+            KeyCode::Char('a') => {
+                self.prompt = Some(Prompt::Create {
+                    input: String::new(),
+                })
+            }
+            KeyCode::Char('r') => {
+                if let Some(e) = self.current().cloned() {
+                    self.prompt = Some(Prompt::Rename {
+                        path: e.path,
+                        input: e.name,
+                    });
+                }
+            }
+            KeyCode::Char('d') => {
+                if let Some(e) = self.current().cloned() {
+                    self.prompt = Some(Prompt::Trash {
+                        path: e.path,
+                        name: e.name,
+                    });
+                }
             }
             _ => {}
         }
         Ok(())
+    }
+
+    /// 入力・確認中のキー。`Enter`で実行、`Esc`で中止。確認は`y`だけが実行。
+    fn prompt_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('c') {
+            self.prompt = None;
+            return;
+        }
+        let Some(prompt) = self.prompt.as_mut() else {
+            return;
+        };
+        match prompt {
+            Prompt::Trash { .. } => {
+                let confirmed = matches!(key.code, KeyCode::Char('y' | 'Y'));
+                let Some(Prompt::Trash { path, name }) = self.prompt.take() else {
+                    return;
+                };
+                if confirmed {
+                    self.trash(&path, &name);
+                } else {
+                    self.message = Some("中止しました".to_string());
+                }
+            }
+            Prompt::Create { input } | Prompt::Rename { input, .. } => match key.code {
+                KeyCode::Char(c) => input.push(c),
+                KeyCode::Backspace => {
+                    input.pop();
+                }
+                KeyCode::Esc => {
+                    self.prompt = None;
+                    self.message = Some("中止しました".to_string());
+                }
+                KeyCode::Enter => {
+                    let prompt = self.prompt.take().unwrap();
+                    match prompt {
+                        Prompt::Create { input } => self.create(&input),
+                        Prompt::Rename { path, input } => self.rename(&path, &input),
+                        Prompt::Trash { .. } => {}
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+
+    fn create(&mut self, name: &str) {
+        match fileops::create(&self.cwd, name) {
+            Ok(path) => {
+                // 途中のディレクトリを作った時は、その最初の要素にカーソルを置く
+                let first = name
+                    .trim_start_matches('/')
+                    .split('/')
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                self.reload(Some(&first));
+                self.message = Some(format!("作りました: {}", path.display()));
+            }
+            Err(err) => self.message = Some(format!("作れません: {err:#}")),
+        }
+    }
+
+    fn rename(&mut self, path: &Path, new_name: &str) {
+        match fileops::rename(path, new_name) {
+            Ok(target) => {
+                let name = target
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.reload(Some(&name));
+                self.message = Some(format!("改名しました: {name}"));
+            }
+            Err(err) => self.message = Some(format!("改名できません: {err:#}")),
+        }
+    }
+
+    fn trash(&mut self, path: &Path, name: &str) {
+        match fileops::trash(path) {
+            Ok(dest) => {
+                let index = self.cursor;
+                self.reload(None);
+                // 消した位置に留まる（末尾なら1つ上）
+                self.cursor = index.min(self.entries.len().saturating_sub(1));
+                self.preview = None;
+                self.message = Some(format!("ごみ箱へ移しました: {name} → {}", dest.display()));
+            }
+            Err(err) => self.message = Some(format!("{err:#}")),
+        }
     }
 
     fn move_cursor(&mut self, delta: isize) {
@@ -478,9 +610,14 @@ impl<'c> Browser<'c> {
     }
 
     fn draw_status(&self, frame: &mut Frame, area: Rect) {
-        let left = match &self.message {
-            Some(m) => format!(" {m}"),
-            None => format!(
+        let left = match (&self.prompt, &self.message) {
+            (Some(Prompt::Create { input }), _) => {
+                format!(" 新規作成（末尾/でディレクトリ）: {input}_")
+            }
+            (Some(Prompt::Rename { input, .. }), _) => format!(" 改名: {input}_"),
+            (Some(Prompt::Trash { name, .. }), _) => format!(" ごみ箱へ移す: {name} (y/N)"),
+            (None, Some(m)) => format!(" {m}"),
+            (None, None) => format!(
                 " {}/{}{}",
                 if self.entries.is_empty() {
                     0
@@ -495,8 +632,16 @@ impl<'c> Browser<'c> {
                 }
             ),
         };
-        let right =
-            "j/k:移動  h/l:親/開く  Enter:読む  e:編集  .:隠し  Ctrl-d/u:プレビュー  q:終了 ";
+        let right = match &self.prompt {
+            Some(Prompt::Trash { .. }) => "y:実行  それ以外:中止 ",
+            Some(_) => "Enter:確定  Esc:中止 ",
+            None => {
+                "j/k:移動  h/l:親/開く  Enter:読む  e:編集  a:作成  r:改名  d:ごみ箱  .:隠し  J/K:プレビュー  q:終了 "
+            }
+        };
+        // 左が長い時は右の案内を優先して、左を幅で切る
+        let avail_left = (area.width as usize).saturating_sub(right.width() + 1);
+        let left = truncate_display(&left, avail_left);
         let gap = (area.width as usize).saturating_sub(left.width() + right.width());
         let line = Line::from(vec![
             Span::raw(left),
@@ -508,6 +653,25 @@ impl<'c> Browser<'c> {
             area,
         );
     }
+}
+
+/// 表示幅で切る（切った印に`…`）。
+fn truncate_display(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut w = 0;
+    for ch in text.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw + 1 > width {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
 }
 
 /// `$HOME`を`~`に縮める（表示用）。

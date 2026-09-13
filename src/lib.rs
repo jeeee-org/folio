@@ -9,6 +9,7 @@ pub mod browser;
 pub mod config;
 pub mod document;
 pub mod drill;
+pub mod fileops;
 pub mod format;
 pub mod highlight;
 pub mod history;
