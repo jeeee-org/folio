@@ -185,6 +185,16 @@ struct Browser<'c> {
     quit: bool,
     /// 下部の1行で受けている入力・確認
     prompt: Option<Prompt>,
+    /// `y`/`x`で覚えた項目
+    clip: Option<Clip>,
+}
+
+/// コピー・移動の元。
+#[derive(Debug, Clone)]
+struct Clip {
+    path: PathBuf,
+    name: String,
+    cut: bool,
 }
 
 /// 下部の1行で受ける入力と確認。
@@ -195,6 +205,8 @@ enum Prompt {
     Rename { path: PathBuf, input: String },
     /// ごみ箱へ移す確認。`y`だけが実行
     Trash { path: PathBuf, name: String },
+    /// 貼り付け先に同名がある時の上書き確認。`y`だけが実行
+    Overwrite { clip: Clip },
 }
 
 impl<'c> Browser<'c> {
@@ -213,6 +225,7 @@ impl<'c> Browser<'c> {
             list_height: 1,
             quit: false,
             prompt: None,
+            clip: None,
         };
         b.reload(None);
         Ok(b)
@@ -270,8 +283,22 @@ impl<'c> Browser<'c> {
         }
         let half = (self.list_height / 2).max(1);
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
+            KeyCode::Char('q') => self.quit = true,
+            // Escは覚えた項目を忘れる。何も無ければ終了
+            KeyCode::Esc if self.clip.is_some() => self.clip = None,
+            KeyCode::Esc => self.quit = true,
             KeyCode::Char('c') if ctrl => self.quit = true,
+            KeyCode::Char('y') => self.remember(false),
+            KeyCode::Char('x') => self.remember(true),
+            KeyCode::Char('p') => self.paste(),
+            KeyCode::Char('o') => {
+                if let Some(e) = self.current().cloned() {
+                    self.message = Some(match fileops::open_external(&e.path) {
+                        Ok(cmd) => format!("{cmd}で開きました: {}", e.name),
+                        Err(err) => format!("開けません: {err:#}"),
+                    });
+                }
+            }
             KeyCode::Char('d') if ctrl => self.move_cursor(half as isize),
             KeyCode::Char('u') if ctrl => self.move_cursor(-(half as isize)),
             KeyCode::PageDown => self.move_cursor(half as isize),
@@ -333,15 +360,17 @@ impl<'c> Browser<'c> {
             return;
         };
         match prompt {
-            Prompt::Trash { .. } => {
+            Prompt::Trash { .. } | Prompt::Overwrite { .. } => {
                 let confirmed = matches!(key.code, KeyCode::Char('y' | 'Y'));
-                let Some(Prompt::Trash { path, name }) = self.prompt.take() else {
-                    return;
-                };
-                if confirmed {
-                    self.trash(&path, &name);
-                } else {
+                let prompt = self.prompt.take().unwrap();
+                if !confirmed {
                     self.message = Some("中止しました".to_string());
+                    return;
+                }
+                match prompt {
+                    Prompt::Trash { path, name } => self.trash(&path, &name),
+                    Prompt::Overwrite { clip } => self.paste_clip(&clip, true),
+                    _ => {}
                 }
             }
             Prompt::Create { input } | Prompt::Rename { input, .. } => match key.code {
@@ -358,11 +387,70 @@ impl<'c> Browser<'c> {
                     match prompt {
                         Prompt::Create { input } => self.create(&input),
                         Prompt::Rename { path, input } => self.rename(&path, &input),
-                        Prompt::Trash { .. } => {}
+                        Prompt::Trash { .. } | Prompt::Overwrite { .. } => {}
                     }
                 }
                 _ => {}
             },
+        }
+    }
+
+    /// `y`（コピー）/`x`（移動）で選択中の項目を覚える。
+    fn remember(&mut self, cut: bool) {
+        if let Some(e) = self.current().cloned() {
+            self.clip = Some(Clip {
+                path: e.path,
+                name: e.name.clone(),
+                cut,
+            });
+            self.message = Some(format!(
+                "{}を覚えました: {}（pで貼り付け、Escで忘れる）",
+                if cut { "移動元" } else { "コピー元" },
+                e.name
+            ));
+        }
+    }
+
+    /// `p`。同名があれば上書きの確認を挟む。
+    fn paste(&mut self) {
+        let Some(clip) = self.clip.clone() else {
+            self.message = Some("yかxで先に項目を覚えてください".to_string());
+            return;
+        };
+        if self.cwd.join(&clip.name).symlink_metadata().is_ok() {
+            self.prompt = Some(Prompt::Overwrite { clip });
+        } else {
+            self.paste_clip(&clip, false);
+        }
+    }
+
+    fn paste_clip(&mut self, clip: &Clip, overwrite: bool) {
+        let result = if clip.cut {
+            fileops::move_into(&clip.path, &self.cwd, overwrite)
+        } else {
+            fileops::copy_into(&clip.path, &self.cwd, overwrite)
+        };
+        match result {
+            Ok(target) => {
+                let name = target
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if clip.cut {
+                    self.clip = None;
+                }
+                self.reload(Some(&name));
+                self.message = Some(format!(
+                    "{}: {}",
+                    if clip.cut {
+                        "移動しました"
+                    } else {
+                        "コピーしました"
+                    },
+                    name
+                ));
+            }
+            Err(err) => self.message = Some(format!("{err:#}")),
         }
     }
 
@@ -616,7 +704,24 @@ impl<'c> Browser<'c> {
             }
             (Some(Prompt::Rename { input, .. }), _) => format!(" 改名: {input}_"),
             (Some(Prompt::Trash { name, .. }), _) => format!(" ごみ箱へ移す: {name} (y/N)"),
+            (Some(Prompt::Overwrite { clip }), _) => {
+                format!(" {}は既にあります。上書きしますか (y/N)", clip.name)
+            }
             (None, Some(m)) => format!(" {m}"),
+            (None, None) if self.clip.is_some() => {
+                let c = self.clip.as_ref().unwrap();
+                format!(
+                    " {}/{}  [{}: {}]",
+                    if self.entries.is_empty() {
+                        0
+                    } else {
+                        self.cursor + 1
+                    },
+                    self.entries.len(),
+                    if c.cut { "移動元" } else { "コピー元" },
+                    c.name
+                )
+            }
             (None, None) => format!(
                 " {}/{}{}",
                 if self.entries.is_empty() {
@@ -633,9 +738,11 @@ impl<'c> Browser<'c> {
             ),
         };
         let right = match &self.prompt {
-            Some(Prompt::Trash { .. }) => "y:実行  それ以外:中止 ",
+            Some(Prompt::Trash { .. } | Prompt::Overwrite { .. }) => "y:実行  それ以外:中止 ",
             Some(_) => "Enter:確定  Esc:中止 ",
-            None => "h/l:親/開く  Enter:読む  e:編集  a:作成  r:改名  d:ごみ箱  .:隠し  q:終了 ",
+            None => {
+                "Enter:読む  e:編集  o:外部  a:作成  r:改名  d:ごみ箱  y/x/p:コピー/移動  q:終了 "
+            }
         };
         // 入らない時は案内を省き、メッセージや入力を優先する
         let width = area.width as usize;

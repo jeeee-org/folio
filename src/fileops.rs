@@ -110,16 +110,114 @@ pub fn trash_into(path: &Path, root: &Path) -> Result<PathBuf> {
         .with_context(|| format!("{}に書けません", info_path.display()))?;
 
     if let Err(err) = fs::rename(&path, &dest) {
-        let _ = fs::remove_file(&info_path);
-        if err.kind() == io::ErrorKind::CrossesDevices {
-            bail!(
-                "{}は別のファイルシステムにあり、ごみ箱へ移せません（コピーして消す操作はまだありません）",
-                path.display()
-            );
+        if err.kind() != io::ErrorKind::CrossesDevices {
+            let _ = fs::remove_file(&info_path);
+            return Err(err).with_context(|| format!("{}をごみ箱へ移せません", path.display()));
         }
-        return Err(err).with_context(|| format!("{}をごみ箱へ移せません", path.display()));
+        // 別のファイルシステム: コピーしてから元を消す
+        if let Err(err) = copy_tree(&path, &dest).and_then(|_| remove_any(&path)) {
+            let _ = remove_any(&dest);
+            let _ = fs::remove_file(&info_path);
+            return Err(err).with_context(|| format!("{}をごみ箱へ移せません", path.display()));
+        }
     }
     Ok(dest)
+}
+
+/// `dst_dir`の中へコピーする（同じ名前で）。ディレクトリは中身ごと。
+/// 同名があれば`overwrite`が真の時だけ消してから置く。
+pub fn copy_into(src: &Path, dst_dir: &Path, overwrite: bool) -> Result<PathBuf> {
+    let target = prepare_target(src, dst_dir, overwrite)?;
+    copy_tree(src, &target).with_context(|| format!("{}をコピーできません", src.display()))?;
+    Ok(target)
+}
+
+/// `dst_dir`の中へ移動する。同じファイルシステムなら`rename`、違えばコピー＋削除。
+pub fn move_into(src: &Path, dst_dir: &Path, overwrite: bool) -> Result<PathBuf> {
+    let target = prepare_target(src, dst_dir, overwrite)?;
+    match fs::rename(src, &target) {
+        Ok(()) => Ok(target),
+        Err(err) if err.kind() == io::ErrorKind::CrossesDevices => {
+            if let Err(err) = copy_tree(src, &target).and_then(|_| remove_any(src)) {
+                let _ = remove_any(&target);
+                return Err(err).with_context(|| format!("{}を移動できません", src.display()));
+            }
+            Ok(target)
+        }
+        Err(err) => Err(err).with_context(|| format!("{}を移動できません", src.display())),
+    }
+}
+
+/// 行き先を決める。自分自身・自分の中への操作は拒み、同名は`overwrite`に従う。
+fn prepare_target(src: &Path, dst_dir: &Path, overwrite: bool) -> Result<PathBuf> {
+    let name = src.file_name().context("名前のないパスです")?;
+    let target = dst_dir.join(name);
+    let src_abs =
+        fs::canonicalize(src).with_context(|| format!("{}が見つかりません", src.display()))?;
+    let dst_abs = fs::canonicalize(dst_dir)
+        .with_context(|| format!("{}が見つかりません", dst_dir.display()))?;
+    if dst_abs == src_abs || dst_abs.starts_with(&src_abs) {
+        bail!("自分自身の中へは置けません");
+    }
+    if target.exists() || target.symlink_metadata().is_ok() {
+        if fs::canonicalize(&target).ok() == Some(src_abs) {
+            bail!("同じ場所です");
+        }
+        if !overwrite {
+            bail!("{}は既にあります", target.display());
+        }
+        remove_any(&target).with_context(|| format!("{}を消せません", target.display()))?;
+    }
+    Ok(target)
+}
+
+/// ファイルはそのまま、ディレクトリは中身ごとコピーする。シンボリックリンクはリンクのまま。
+fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(src)?;
+    if meta.file_type().is_symlink() {
+        let link = fs::read_link(src)?;
+        std::os::unix::fs::symlink(link, dst)?;
+        return Ok(());
+    }
+    if meta.is_dir() {
+        fs::create_dir(dst)?;
+        for item in fs::read_dir(src)? {
+            let item = item?;
+            copy_tree(&item.path(), &dst.join(item.file_name()))?;
+        }
+        Ok(())
+    } else {
+        fs::copy(src, dst).map(|_| ())
+    }
+}
+
+/// ファイルでもディレクトリでも消す（ごみ箱を通さない。コピー後の元や上書きの対象用）。
+fn remove_any(path: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    if meta.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
+/// 外部アプリで開く（`wslview`があればそれ、無ければ`xdg-open`）。使ったコマンド名を返す。
+pub fn open_external(path: &Path) -> Result<String> {
+    let candidates = ["wslview", "xdg-open"];
+    for cmd in candidates {
+        let spawned = std::process::Command::new(cmd)
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match spawned {
+            Ok(_) => return Ok(cmd.to_string()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err).with_context(|| format!("{cmd}を起動できません")),
+        }
+    }
+    bail!("wslviewもxdg-openも見つかりません")
 }
 
 /// `files/`と`info/`の両方で空いている名前を選ぶ（`name`、`name.2`、`name.3`…）。
@@ -221,6 +319,34 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         assert!(trash_into(&dir, &root).is_err());
         assert!(trash_into(&dir.join("missing"), &root).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn copy_and_move_handle_files_dirs_and_overwrite() {
+        let dir = sandbox("copy");
+        let src = create(&dir, "src/").unwrap();
+        fs::write(src.join("a.txt"), "A").unwrap();
+        fs::create_dir(src.join("inner")).unwrap();
+        fs::write(src.join("inner/b.txt"), "B").unwrap();
+        let dst = create(&dir, "dst/").unwrap();
+        // ディレクトリを中身ごとコピー
+        let copied = copy_into(&src, &dst, false).unwrap();
+        assert_eq!(fs::read_to_string(copied.join("inner/b.txt")).unwrap(), "B");
+        // 同名は拒む／上書きなら置き換える
+        assert!(copy_into(&src, &dst, false).is_err());
+        fs::write(src.join("a.txt"), "A2").unwrap();
+        copy_into(&src, &dst, true).unwrap();
+        assert_eq!(fs::read_to_string(copied.join("a.txt")).unwrap(), "A2");
+        // 自分の中へは拒む
+        assert!(copy_into(&src, &src.join("inner"), true).is_err());
+        // ファイルの移動
+        let f = create(&dir, "f.txt").unwrap();
+        let moved = move_into(&f, &dst, false).unwrap();
+        assert!(moved.exists() && !f.exists());
+        // ディレクトリの移動（上書き）
+        let moved_dir = move_into(&src, &dst, true).unwrap();
+        assert!(moved_dir.join("inner/b.txt").exists() && !src.exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 
