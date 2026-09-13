@@ -639,9 +639,14 @@ impl<'c> Browser<'c> {
                 "j/k:移動  h/l:親/開く  Enter:読む  e:編集  a:作成  r:改名  d:ごみ箱  .:隠し  J/K:プレビュー  q:終了 "
             }
         };
-        // 左が長い時は右の案内を優先して、左を幅で切る
-        let avail_left = (area.width as usize).saturating_sub(right.width() + 1);
-        let left = truncate_display(&left, avail_left);
+        // 入らない時は案内を省き、メッセージや入力を優先する
+        let width = area.width as usize;
+        let right = if left.width() + right.width() > width {
+            ""
+        } else {
+            right
+        };
+        let left = truncate_display(&left, width.saturating_sub(right.width()));
         let gap = (area.width as usize).saturating_sub(left.width() + right.width());
         let line = Line::from(vec![
             Span::raw(left),
