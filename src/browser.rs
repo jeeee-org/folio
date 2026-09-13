@@ -635,9 +635,7 @@ impl<'c> Browser<'c> {
         let right = match &self.prompt {
             Some(Prompt::Trash { .. }) => "y:実行  それ以外:中止 ",
             Some(_) => "Enter:確定  Esc:中止 ",
-            None => {
-                "j/k:移動  h/l:親/開く  Enter:読む  e:編集  a:作成  r:改名  d:ごみ箱  .:隠し  J/K:プレビュー  q:終了 "
-            }
+            None => "h/l:親/開く  Enter:読む  e:編集  a:作成  r:改名  d:ごみ箱  .:隠し  q:終了 ",
         };
         // 入らない時は案内を省き、メッセージや入力を優先する
         let width = area.width as usize;
