@@ -195,6 +195,8 @@ struct Preview {
     lines: Vec<Line<'static>>,
     flow: Vec<Flow>,
     scroll: usize,
+    /// フォルダの中身のプレビューなら、その項目（行と同じ順）。ファイルなら空
+    children: Vec<Entry>,
 }
 
 struct Browser<'c> {
@@ -346,10 +348,19 @@ impl<'c> Browser<'c> {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.drag.clear();
                 if self.preview_inner.contains(at) {
-                    // プレビューの文字を選び始める
                     self.message = None;
                     self.last_click = None;
-                    if let Some(p) = self.preview_point(at) {
+                    let listing = self
+                        .preview
+                        .as_ref()
+                        .is_some_and(|p| !p.children.is_empty());
+                    if listing {
+                        // フォルダの中身: クリックした項目を1回で開く
+                        if let Some(child) = self.preview_child_at(at) {
+                            self.open_child(terminal, child)?;
+                        }
+                    } else if let Some(p) = self.preview_point(at) {
+                        // ファイルの中身: 文字を選び始める
                         self.drag.begin(p);
                     }
                 } else if self.list_area.contains(at) && at.y == self.list_area.y {
@@ -390,6 +401,27 @@ impl<'c> Browser<'c> {
             _ => return Ok(false),
         }
         Ok(true)
+    }
+
+    /// プレビューがフォルダの中身の時、画面の位置の行にある項目。
+    fn preview_child_at(&self, at: Position) -> Option<Entry> {
+        let p = self.preview.as_ref()?;
+        let row = at.y.checked_sub(self.preview_inner.y)? as usize;
+        p.children.get(p.scroll + row).cloned()
+    }
+
+    /// プレビューに出ているフォルダの中身の項目を開く。そのフォルダへ移って項目にカーソルを置き、
+    /// 一覧で開く時と同じく、フォルダなら中へ入り、ファイルなら全画面で読む。
+    fn open_child(&mut self, terminal: &mut DefaultTerminal, child: Entry) -> Result<()> {
+        let Some(parent) = child.path.parent().map(Path::to_path_buf) else {
+            return Ok(());
+        };
+        self.cwd = parent;
+        self.reload(Some(&child.name));
+        if self.current().is_some_and(|e| e.name == child.name) {
+            self.open(terminal)?;
+        }
+        Ok(())
     }
 
     /// 画面の位置を、プレビューの行の中の位置に直す。
@@ -813,7 +845,7 @@ impl<'c> Browser<'c> {
             .filter(|p| p.path == entry.path)
             .map(|p| p.scroll)
             .unwrap_or(0);
-        let Rendered { lines, flow, .. } = self.build_preview(&entry, width);
+        let (Rendered { lines, flow, .. }, children) = self.build_preview(&entry, width);
         // 描き直すと行の位置が変わるので、選択は捨てる
         self.drag.clear();
         self.preview = Some(Preview {
@@ -822,41 +854,53 @@ impl<'c> Browser<'c> {
             lines,
             flow,
             scroll,
+            children,
         });
     }
 
-    fn build_preview(&self, entry: &Entry, width: u16) -> Rendered {
+    /// プレビューの行と、フォルダならその中身の項目（行と同じ順）。
+    fn build_preview(&self, entry: &Entry, width: u16) -> (Rendered, Vec<Entry>) {
         if entry.is_dir {
-            return lines_only(match list_dir(&entry.path, self.show_hidden) {
-                Ok(entries) if entries.is_empty() => vec![Line::from("（空のディレクトリ）").dim()],
-                Ok(entries) => entries
-                    .iter()
-                    .map(|e| {
-                        if e.is_dir {
-                            Line::from(Span::styled(
-                                format!("{}/", e.name),
-                                Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
-                            ))
-                        } else {
-                            Line::from(e.name.clone())
-                        }
-                    })
-                    .collect(),
-                Err(err) => vec![Line::from(err.to_string()).red()],
-            });
+            return match list_dir(&entry.path, self.show_hidden) {
+                Ok(entries) if entries.is_empty() => (
+                    lines_only(vec![Line::from("（空のディレクトリ）").dim()]),
+                    Vec::new(),
+                ),
+                Ok(entries) => {
+                    let lines = entries
+                        .iter()
+                        .map(|e| {
+                            if e.is_dir {
+                                Line::from(Span::styled(
+                                    format!("{}/", e.name),
+                                    Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
+                                ))
+                            } else {
+                                Line::from(e.name.clone())
+                            }
+                        })
+                        .collect();
+                    (lines_only(lines), entries)
+                }
+                Err(err) => (
+                    lines_only(vec![Line::from(err.to_string()).red()]),
+                    Vec::new(),
+                ),
+            };
         }
         match read_for_preview(&entry.path) {
-            PreviewSource::Skip(reason) => lines_only(vec![Line::from(reason).dim()]),
+            PreviewSource::Skip(reason) => (lines_only(vec![Line::from(reason).dim()]), Vec::new()),
             PreviewSource::Text(source) => {
                 let format = Format::detect(&entry.path, |e| self.highlighter.supports(e));
                 let blocks = format.parse(&entry.path, &source);
-                render::render_with(
+                let rendered = render::render_with(
                     &blocks,
                     width.saturating_sub(2),
                     &self.theme,
                     Some(&self.highlighter),
                     &Options::default(),
-                )
+                );
+                (rendered, Vec::new())
             }
         }
     }
@@ -973,6 +1017,29 @@ fn shorten_home(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_of_directory_maps_rows_to_children() {
+        let dir = std::env::temp_dir().join(format!("folio-preview-click-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("sub/inner")).unwrap();
+        fs::write(dir.join("sub/a.md"), "# a").unwrap();
+        fs::write(dir.join("top.md"), "# top").unwrap();
+        let config = Config::default();
+        let mut b = Browser::new(dir.clone(), &config).unwrap();
+        // カーソルは先頭のsub/。右にその中身（inner/、a.md）が出る
+        b.preview_inner = Rect::new(40, 0, 40, 10);
+        b.ensure_preview(40);
+        let at = |y| b.preview_child_at(Position::new(45, y)).map(|e| e.name);
+        assert_eq!(at(0).as_deref(), Some("inner"));
+        assert_eq!(at(1).as_deref(), Some("a.md"));
+        assert_eq!(at(2), None);
+        // ファイルのプレビューには項目が無い（ドラッグ選択に回る）
+        b.set_cursor(1);
+        b.ensure_preview(40);
+        assert!(b.preview.as_ref().unwrap().children.is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn click_row_maps_to_entry_with_offset() {
