@@ -9,10 +9,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result};
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
-use ratatui::layout::{Constraint, Layout, Margin, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
@@ -25,6 +25,7 @@ use crate::format::Format;
 use crate::highlight::Highlighter;
 use crate::render::{self, Options, Rendered, Theme};
 use crate::search::{self, Match};
+use crate::select::{self, Dragger};
 
 /// 折り返し幅の右に空けておく桁数（ぶら下げ句読点の逃げ場）。
 const HANG_RESERVE: u16 = 2;
@@ -33,7 +34,7 @@ const HANG_RESERVE: u16 = 2;
 const TOC_MIN_WIDTH: u16 = 24;
 
 /// ホイール1回で動かす行数（項目数）。
-pub const WHEEL_STEP: isize = 3;
+pub const WHEEL_STEP: isize = 5;
 
 /// 端末にマウスを受け取らせているか。エディタに渡す間だけ止めて戻すために覚えておく。
 static MOUSE_CAPTURE: AtomicBool = AtomicBool::new(false);
@@ -85,7 +86,9 @@ pub fn render_to_stdout(
 /// `folio view <path>`の本体。ファイルを読み、閉じるまでターミナルを占有する。
 pub fn run(path: &Path, config: &Config, format: Option<Format>) -> Result<()> {
     let mut terminal = ratatui::init();
-    let result = view_in(&mut terminal, path, config, format);
+    let result =
+        set_mouse_capture(true).and_then(|()| view_in(&mut terminal, path, config, format));
+    let _ = set_mouse_capture(false);
     ratatui::restore();
     result
 }
@@ -136,6 +139,15 @@ pub fn open_editor(terminal: &mut DefaultTerminal, path: &Path) -> Result<Result
     })
 }
 
+/// 端末経由でクリップボードへ送る（OSC 52）。
+pub fn copy_to_clipboard(text: &str) -> Result<()> {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    out.write_all(select::osc52(text).as_bytes())?;
+    out.flush()?;
+    Ok(())
+}
+
 /// ファイルをUTF-8として読む。文字コードの自動判定はしない。
 pub fn read(path: &Path) -> Result<String> {
     let bytes = fs::read(path).with_context(|| format!("{}を読めません", path.display()))?;
@@ -184,6 +196,10 @@ struct App {
     input: Option<String>,
     /// 確定した検索
     search: Option<Search>,
+    /// 直前の描画での本文の領域（マウスの位置を行に直す）
+    body: Rect,
+    /// ドラッグでの文字の選択
+    drag: Dragger,
 }
 
 struct Search {
@@ -218,6 +234,8 @@ impl App {
             margin: config.view.margin,
             input: None,
             search: None,
+            body: Rect::default(),
+            drag: Dragger::default(),
         })
     }
 
@@ -251,21 +269,57 @@ impl App {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     self.message = None;
+                    self.drag.clear();
                     match self.key(key) {
                         Action::None => {}
                         Action::Edit => self.edit(terminal)?,
                     }
                 }
-                // マウスはファイラーから開いた時だけ届く。ホイールで本文を動かす
-                Event::Mouse(m) => match m.kind {
-                    MouseEventKind::ScrollDown => self.scroll_by(WHEEL_STEP),
-                    MouseEventKind::ScrollUp => self.scroll_by(-WHEEL_STEP),
-                    _ => dirty = false,
-                },
+                Event::Mouse(m) => dirty = self.mouse(m)?,
                 _ => {}
             }
         }
         Ok(())
+    }
+
+    /// マウス。ホイールで本文を動かし、ドラッグで選んだ文字を離した時にクリップボードへ送る。
+    /// 画面が変わる時に`true`。
+    fn mouse(&mut self, m: MouseEvent) -> Result<bool> {
+        let total = self.rendered.lines.len();
+        match m.kind {
+            MouseEventKind::ScrollDown => self.scroll_by(WHEEL_STEP),
+            MouseEventKind::ScrollUp => self.scroll_by(-WHEEL_STEP),
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.message = None;
+                let point = select::point_at(self.body, self.scroll, total, m.column, m.row);
+                match point {
+                    Some(p) if self.body.contains(Position::new(m.column, m.row)) => {
+                        self.drag.begin(p)
+                    }
+                    _ => self.drag.clear(),
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.drag.is_dragging() => {
+                // 本文の上下にはみ出したら、その向きに1行ずつ送る
+                self.scroll_by(select::edge_scroll(self.body, m.row));
+                self.scroll = self.scroll.min(total.saturating_sub(self.page_height));
+                if let Some(p) = select::point_at(self.body, self.scroll, total, m.column, m.row) {
+                    self.drag.extend(p);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.drag.is_dragging() => {
+                if let Some(sel) = self.drag.finish() {
+                    let text = select::text(&self.rendered.lines, &self.rendered.flow, sel);
+                    if !text.is_empty() {
+                        copy_to_clipboard(&text)?;
+                        self.message =
+                            Some(format!("コピーしました（{}文字）", text.chars().count()));
+                    }
+                }
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
     }
 
     /// 本文の折り返し幅が変わっていたら描き直す。
@@ -285,6 +339,8 @@ impl App {
             &self.options,
         );
         self.rendered_width = wrap_width;
+        // 行の位置が変わるので、選択は捨てる
+        self.drag.clear();
         if let Some((i, offset)) = anchor
             && let Some(h) = self.rendered.headings.get(i)
         {
@@ -311,6 +367,7 @@ impl App {
         let body = body.inner(Margin::new(self.margin, 0));
         // 広い端末では本文を最大幅の列に収め、余りは左右に均等に配る（リーダー表示）
         let body = centered_column(body, self.max_width + HANG_RESERVE);
+        self.body = body;
 
         // 行頭禁則でぶら下がる句読点（最大2桁）を切らないよう、折り返し幅は描画領域より2桁狭くする
         self.ensure_rendered(body.width.saturating_sub(HANG_RESERVE));
@@ -330,29 +387,34 @@ impl App {
         frame.render_widget(self.status_line(end, total), status);
     }
 
-    /// 行にヒットの強調を重ねる。今いるヒットは反転、他は黄色の背景。
+    /// 行にヒットの強調と選択を重ねる。今いるヒットは黄色、他は暗い黄色の背景。
     fn line_with_matches(&self, i: usize) -> Line<'static> {
         let line = &self.rendered.lines[i];
-        let Some(s) = &self.search else {
-            return line.clone();
-        };
-        let ranges: Vec<(usize, usize, Style)> = s
-            .matches
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| m.line == i)
-            .map(|(k, m)| {
-                let style = if k == s.current {
-                    Style::new()
-                        .bg(Color::Yellow)
-                        .fg(Color::Black)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::new().bg(Color::Indexed(58)).fg(Color::White)
-                };
-                (m.start, m.end, style)
-            })
-            .collect();
+        let mut ranges: Vec<(usize, usize, Style)> = Vec::new();
+        if let Some(s) = &self.search {
+            ranges.extend(
+                s.matches
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| m.line == i)
+                    .map(|(k, m)| {
+                        let style = if k == s.current {
+                            Style::new()
+                                .bg(Color::Yellow)
+                                .fg(Color::Black)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::new().bg(Color::Indexed(58)).fg(Color::White)
+                        };
+                        (m.start, m.end, style)
+                    }),
+            );
+        }
+        if let Some(sel) = self.drag.selection()
+            && let Some((from, to)) = select::chars_in_line(line, &self.rendered.flow, sel, i)
+        {
+            ranges.push((from, to, select::style()));
+        }
         search::highlight(line, &ranges)
     }
 

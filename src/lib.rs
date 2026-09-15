@@ -16,5 +16,6 @@ pub mod history;
 pub mod practice;
 pub mod render;
 pub mod search;
+pub mod select;
 pub mod viewer;
 pub mod vim;

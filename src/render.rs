@@ -60,11 +60,33 @@ impl Default for Theme {
 /// 折り返し幅がこれより狭い時は、この幅で描いてはみ出させる（0幅で無限ループしないため）。
 const MIN_WIDTH: usize = 8;
 
-/// 描画結果。行の列と、目次やジャンプに使う見出しの位置。
+/// 描画結果。行の列と、目次やジャンプに使う見出しの位置、行どうしのつながり。
 #[derive(Debug, Clone, Default)]
 pub struct Rendered {
     pub lines: Vec<Line<'static>>,
     pub headings: Vec<Heading>,
+    /// `lines`と同じ長さ。選んだ文字をコピーする時に、折り返しをつなぎ直すのに使う
+    pub flow: Vec<Flow>,
+}
+
+/// 1行の、行頭の飾りの長さと、次の行へのつながり。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Flow {
+    /// 行頭の飾り（リストの記号・字下げ・引用の縦線）の文字数
+    pub prefix: usize,
+    pub joint: Joint,
+}
+
+/// 次の行へのつながり。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Joint {
+    /// 原文でも行が分かれている（段落の終わり・改行・表やコードの行）
+    #[default]
+    Hard,
+    /// 幅で折り返した。そのままつなぐ（日本語や長い語の途中）
+    Soft,
+    /// 空白の位置で折り返した。空白1つでつなぐ
+    SoftSpace,
 }
 
 /// 描画後の見出し1つ。`line`は`Rendered::lines`の添字。
@@ -103,14 +125,17 @@ pub fn render_with(
         options: *options,
         lines: Vec::new(),
         headings: Vec::new(),
+        flow: Vec::new(),
     };
     renderer.blocks(blocks, &Prefix::default(), false);
     while renderer.lines.last().is_some_and(is_blank) {
         renderer.lines.pop();
+        renderer.flow.pop();
     }
     Rendered {
         lines: renderer.lines,
         headings: renderer.headings,
+        flow: renderer.flow,
     }
 }
 
@@ -154,6 +179,7 @@ struct Renderer<'t> {
     options: Options,
     lines: Vec<Line<'static>>,
     headings: Vec<Heading>,
+    flow: Vec<Flow>,
 }
 
 impl Renderer<'_> {
@@ -162,9 +188,23 @@ impl Renderer<'_> {
     }
 
     fn emit(&mut self, prefix: &[Span<'static>], content: Vec<Span<'static>>) {
+        self.emit_wrapped(prefix, content, Joint::Hard);
+    }
+
+    /// 折り返した段落の1行を出す。`joint`は次の行へのつながり。
+    fn emit_wrapped(
+        &mut self,
+        prefix: &[Span<'static>],
+        content: Vec<Span<'static>>,
+        joint: Joint,
+    ) {
         let mut spans = prefix.to_vec();
         spans.extend(content);
         self.lines.push(Line::from(spans));
+        self.flow.push(Flow {
+            prefix: prefix.iter().map(|s| s.content.chars().count()).sum(),
+            joint,
+        });
     }
 
     fn blank(&mut self, prefix: &Prefix) {
@@ -254,9 +294,9 @@ impl Renderer<'_> {
             self.options.show_urls,
         );
         let mut first = true;
-        for spans in wrapped {
+        for (spans, joint) in wrapped {
             let p = if first { &prefix.first } else { &prefix.rest };
-            self.emit(p, spans);
+            self.emit_wrapped(p, spans, joint);
             first = false;
         }
         if let Some(ch) = self.theme.heading_rule[idx] {
@@ -270,7 +310,7 @@ impl Renderer<'_> {
     fn paragraph(&mut self, inlines: &[Inline], prefix: &Prefix, base: Style) {
         let avail = self.avail(prefix);
         let mut first = true;
-        for spans in wrap_inlines_opts(
+        for (spans, joint) in wrap_inlines_opts(
             inlines,
             avail,
             base,
@@ -279,7 +319,7 @@ impl Renderer<'_> {
             self.options.show_urls,
         ) {
             let p = if first { &prefix.first } else { &prefix.rest };
-            self.emit(p, spans);
+            self.emit_wrapped(p, spans, joint);
             first = false;
         }
     }
@@ -378,7 +418,11 @@ impl Renderer<'_> {
             let cells: Vec<Vec<Vec<Span<'static>>>> = (0..ncols)
                 .map(|c| {
                     let cell = row.get(c).unwrap_or(&empty);
+                    // 表のセル内の折り返しは表の行として扱う（つなぐと列が混ざる）
                     wrap_inlines_opts(cell, widths[c], base, theme, false, false)
+                        .into_iter()
+                        .map(|(spans, _)| spans)
+                        .collect()
                 })
                 .collect();
             let height = cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
@@ -609,7 +653,7 @@ fn is_cjk(ch: char) -> bool {
         0x3000..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF | 0x20000..=0x2FA1F)
 }
 
-/// インライン列を`avail`桁で折り返し、行ごとのスパン列にする。
+/// インライン列を`avail`桁で折り返し、行ごとのスパン列と次の行へのつながりにする。
 /// `allow_hang`が偽なら行頭禁則のぶら下げをせず、必ず`avail`に収める（表のセル用）。
 /// `show_urls`が真ならリンクの後ろにURLを添える。
 fn wrap_inlines_opts(
@@ -619,9 +663,9 @@ fn wrap_inlines_opts(
     theme: &Theme,
     allow_hang: bool,
     show_urls: bool,
-) -> Vec<Vec<Span<'static>>> {
+) -> Vec<(Vec<Span<'static>>, Joint)> {
     let avail = avail.max(1);
-    let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut lines: Vec<(Vec<Span<'static>>, Joint)> = Vec::new();
     let mut cur: Vec<Span<'static>> = Vec::new();
     let mut cur_w = 0usize;
     let mut pending_space: Option<(usize, Style)> = None;
@@ -636,7 +680,7 @@ fn wrap_inlines_opts(
     for token in tokenize(inlines, base, theme, show_urls) {
         match token {
             Token::Break => {
-                lines.push(std::mem::take(&mut cur));
+                lines.push((std::mem::take(&mut cur), Joint::Hard));
                 cur_w = 0;
                 pending_space = None;
             }
@@ -650,7 +694,13 @@ fn wrap_inlines_opts(
                 // 行頭禁則の文字（句読点・閉じ括弧）は幅を超えても前の行にぶら下げる
                 let hang = allow_hang && cur_w > 0 && space_w == 0 && is_no_line_start(&text);
                 if cur_w > 0 && cur_w + space_w + w > avail && !hang {
-                    lines.push(std::mem::take(&mut cur));
+                    // 空白の位置で折り返したなら、つなぐ時に空白を戻す
+                    let joint = if space_w > 0 {
+                        Joint::SoftSpace
+                    } else {
+                        Joint::Soft
+                    };
+                    lines.push((std::mem::take(&mut cur), joint));
                     cur_w = 0;
                     pending_space = None;
                 } else if let Some((n, s)) = pending_space.take() {
@@ -665,7 +715,7 @@ fn wrap_inlines_opts(
                         let cw = ch.width().unwrap_or(0);
                         if cur_w + chunk_w + cw > avail {
                             push_span(&mut cur, &chunk, style);
-                            lines.push(std::mem::take(&mut cur));
+                            lines.push((std::mem::take(&mut cur), Joint::Soft));
                             cur_w = 0;
                             chunk.clear();
                             chunk_w = 0;
@@ -683,7 +733,7 @@ fn wrap_inlines_opts(
         }
     }
     if !cur.is_empty() || lines.is_empty() {
-        lines.push(cur);
+        lines.push((cur, Joint::Hard));
     }
     lines
 }
@@ -707,6 +757,50 @@ mod tests {
 
     fn widths(lines: &[Line<'_>]) -> Vec<usize> {
         lines.iter().map(|l| l.width()).collect()
+    }
+
+    fn joints(md: &str, width: u16) -> Vec<Joint> {
+        let r = render_with(
+            &parse(md),
+            width,
+            &Theme::default(),
+            None,
+            &Options::default(),
+        );
+        assert_eq!(r.flow.len(), r.lines.len());
+        r.flow.iter().map(|f| f.joint).collect()
+    }
+
+    #[test]
+    fn flow_records_how_wrapped_lines_join() {
+        // 空白で折り返した英語、どこでも折れる日本語、段落の終わり
+        assert_eq!(
+            joints("aaa bbb ccc ddd", 8),
+            vec![Joint::SoftSpace, Joint::Hard]
+        );
+        assert_eq!(
+            joints("あいうえおかきくけこ", 10),
+            vec![Joint::Soft, Joint::Hard]
+        );
+        // 段落内の改行は原文どおり分ける
+        assert_eq!(joints("a\\\nb", 20), vec![Joint::Hard, Joint::Hard]);
+        // 表のセル内の折り返しは表の行
+        let md = "| 名前 | 説明 |\n|---|---|\n| folio | ターミナルで文書を読み、そのまま編集に入るための道具。 |\n";
+        assert!(joints(md, 30).iter().all(|j| *j == Joint::Hard));
+    }
+
+    #[test]
+    fn flow_records_prefix_length() {
+        let r = render_with(
+            &parse("- one two three four"),
+            12,
+            &Theme::default(),
+            None,
+            &Options::default(),
+        );
+        assert_eq!(plain(&r.lines), vec!["• one two", "  three four"]);
+        assert_eq!(r.flow[0].prefix, 2);
+        assert_eq!(r.flow[1].prefix, 2);
     }
 
     #[test]

@@ -23,7 +23,9 @@ use crate::config::Config;
 use crate::fileops;
 use crate::format::Format;
 use crate::highlight::Highlighter;
-use crate::render::{self, Options, Theme};
+use crate::render::{self, Flow, Options, Rendered, Theme};
+use crate::search;
+use crate::select::{self, Dragger};
 use crate::viewer;
 
 /// プレビューで読む上限（バイト）。これより大きいファイルは読まない。
@@ -191,6 +193,7 @@ struct Preview {
     path: PathBuf,
     width: u16,
     lines: Vec<Line<'static>>,
+    flow: Vec<Flow>,
     scroll: usize,
 }
 
@@ -219,6 +222,10 @@ struct Browser<'c> {
     preview_area: Rect,
     /// 直前のクリック（ダブルクリックの判定用）
     last_click: Option<(Instant, usize)>,
+    /// 直前の描画でのプレビューの本文の領域（選択の位置を求める）
+    preview_inner: Rect,
+    /// プレビューでのドラッグ選択
+    drag: Dragger,
 }
 
 /// コピー・移動の元。
@@ -263,6 +270,8 @@ impl<'c> Browser<'c> {
             list_inner: Rect::default(),
             preview_area: Rect::default(),
             last_click: None,
+            preview_inner: Rect::default(),
+            drag: Dragger::default(),
         };
         b.reload(None);
         Ok(b)
@@ -335,7 +344,15 @@ impl<'c> Browser<'c> {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if self.list_area.contains(at) && at.y == self.list_area.y {
+                self.drag.clear();
+                if self.preview_inner.contains(at) {
+                    // プレビューの文字を選び始める
+                    self.message = None;
+                    self.last_click = None;
+                    if let Some(p) = self.preview_point(at) {
+                        self.drag.begin(p);
+                    }
+                } else if self.list_area.contains(at) && at.y == self.list_area.y {
                     self.message = None;
                     self.go_parent();
                 } else if let Some(index) = list_index_at(
@@ -358,9 +375,32 @@ impl<'c> Browser<'c> {
                     return Ok(false);
                 }
             }
+            MouseEventKind::Drag(MouseButton::Left) if self.drag.is_dragging() => {
+                // プレビューの上下にはみ出したら、その向きに1行ずつ送る
+                self.scroll_preview(select::edge_scroll(self.preview_inner, at.y));
+                if let Some(p) = self.preview_point(at) {
+                    self.drag.extend(p);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.drag.is_dragging() => {
+                if let (Some(sel), Some(p)) = (self.drag.finish(), &self.preview) {
+                    let text = select::text(&p.lines, &p.flow, sel);
+                    if !text.is_empty() {
+                        viewer::copy_to_clipboard(&text)?;
+                        self.message =
+                            Some(format!("コピーしました（{}文字）", text.chars().count()));
+                    }
+                }
+            }
             _ => return Ok(false),
         }
         Ok(true)
+    }
+
+    /// 画面の位置を、プレビューの行の中の位置に直す。
+    fn preview_point(&self, at: Position) -> Option<select::Point> {
+        let p = self.preview.as_ref()?;
+        select::point_at(self.preview_inner, p.scroll, p.lines.len(), at.x, at.y)
     }
 
     fn key(&mut self, terminal: &mut DefaultTerminal, key: KeyEvent) -> Result<()> {
@@ -370,6 +410,7 @@ impl<'c> Browser<'c> {
             return Ok(());
         }
         self.message = None;
+        self.drag.clear();
         if self.pending_g {
             self.pending_g = false;
             if key.code == KeyCode::Char('g') {
@@ -658,8 +699,12 @@ impl<'c> Browser<'c> {
     }
 
     fn scroll_preview(&mut self, delta: isize) {
+        let height = self.preview_inner.height as usize;
         if let Some(p) = &mut self.preview {
-            p.scroll = p.scroll.saturating_add_signed(delta);
+            p.scroll = p
+                .scroll
+                .saturating_add_signed(delta)
+                .min(p.lines.len().saturating_sub(height));
         }
     }
 
@@ -721,7 +766,9 @@ impl<'c> Browser<'c> {
             width: area.width.saturating_sub(1),
             ..area
         };
+        self.preview_inner = inner;
         self.ensure_preview(inner.width);
+        let selection = self.drag.selection();
         let Some(p) = &mut self.preview else {
             return;
         };
@@ -731,7 +778,17 @@ impl<'c> Browser<'c> {
         p.scroll = p.scroll.min(max_scroll);
         let scroll = p.scroll;
         let end = (scroll + height).min(p.lines.len());
-        let text = Text::from(p.lines[scroll..end].to_vec());
+        let lines: Vec<Line<'static>> = (scroll..end)
+            .map(|i| {
+                match selection.and_then(|s| select::chars_in_line(&p.lines[i], &p.flow, s, i)) {
+                    Some((from, to)) => {
+                        search::highlight(&p.lines[i], &[(from, to, select::style())])
+                    }
+                    None => p.lines[i].clone(),
+                }
+            })
+            .collect();
+        let text = Text::from(lines);
         frame.render_widget(Paragraph::new(text), inner);
     }
 
@@ -753,18 +810,21 @@ impl<'c> Browser<'c> {
             .filter(|p| p.path == entry.path)
             .map(|p| p.scroll)
             .unwrap_or(0);
-        let lines = self.build_preview(&entry, width);
+        let Rendered { lines, flow, .. } = self.build_preview(&entry, width);
+        // 描き直すと行の位置が変わるので、選択は捨てる
+        self.drag.clear();
         self.preview = Some(Preview {
             path: entry.path,
             width,
             lines,
+            flow,
             scroll,
         });
     }
 
-    fn build_preview(&self, entry: &Entry, width: u16) -> Vec<Line<'static>> {
+    fn build_preview(&self, entry: &Entry, width: u16) -> Rendered {
         if entry.is_dir {
-            return match list_dir(&entry.path, self.show_hidden) {
+            return lines_only(match list_dir(&entry.path, self.show_hidden) {
                 Ok(entries) if entries.is_empty() => vec![Line::from("（空のディレクトリ）").dim()],
                 Ok(entries) => entries
                     .iter()
@@ -780,10 +840,10 @@ impl<'c> Browser<'c> {
                     })
                     .collect(),
                 Err(err) => vec![Line::from(err.to_string()).red()],
-            };
+            });
         }
         match read_for_preview(&entry.path) {
-            PreviewSource::Skip(reason) => vec![Line::from(reason).dim()],
+            PreviewSource::Skip(reason) => lines_only(vec![Line::from(reason).dim()]),
             PreviewSource::Text(source) => {
                 let format = Format::detect(&entry.path, |e| self.highlighter.supports(e));
                 let blocks = format.parse(&entry.path, &source);
@@ -794,7 +854,6 @@ impl<'c> Browser<'c> {
                     Some(&self.highlighter),
                     &Options::default(),
                 )
-                .lines
             }
         }
     }
@@ -864,6 +923,14 @@ impl<'c> Browser<'c> {
             Paragraph::new(line).style(Style::new().bg(Color::Indexed(238)).fg(Color::White)),
             area,
         );
+    }
+}
+
+/// 行どうしのつながりを持たない行の列（ディレクトリの中身や、読まない理由）。
+fn lines_only(lines: Vec<Line<'static>>) -> Rendered {
+    Rendered {
+        lines,
+        ..Rendered::default()
     }
 }
 
