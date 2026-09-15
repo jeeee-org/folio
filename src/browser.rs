@@ -383,13 +383,8 @@ impl<'c> Browser<'c> {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) if self.drag.is_dragging() => {
-                if let (Some(sel), Some(p)) = (self.drag.finish(), &self.preview) {
-                    let text = select::text(&p.lines, &p.flow, sel);
-                    if !text.is_empty() {
-                        viewer::copy_to_clipboard(&text)?;
-                        self.message =
-                            Some(format!("コピーしました（{}文字）", text.chars().count()));
-                    }
+                if self.drag.finish().is_some() {
+                    self.message = Some(viewer::SELECTED_HINT.to_string());
                 }
             }
             _ => return Ok(false),
@@ -410,6 +405,14 @@ impl<'c> Browser<'c> {
             return Ok(());
         }
         self.message = None;
+        // プレビューで選んでいれば、Ctrl-cはコピー・Escは解除（終了や忘れるより先）
+        if let Some(p) = &self.preview
+            && viewer::selection_key(&mut self.drag, key, &mut self.message, |s| {
+                select::text(&p.lines, &p.flow, s)
+            })?
+        {
+            return Ok(());
+        }
         self.drag.clear();
         if self.pending_g {
             self.pending_g = false;

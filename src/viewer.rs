@@ -25,7 +25,7 @@ use crate::format::Format;
 use crate::highlight::Highlighter;
 use crate::render::{self, Options, Rendered, Theme};
 use crate::search::{self, Match};
-use crate::select::{self, Dragger};
+use crate::select::{self, Dragger, Selection};
 
 /// 折り返し幅の右に空けておく桁数（ぶら下げ句読点の逃げ場）。
 const HANG_RESERVE: u16 = 2;
@@ -137,6 +137,35 @@ pub fn open_editor(terminal: &mut DefaultTerminal, path: &Path) -> Result<Result
         Ok(s) => Err(format!("エディタが異常終了しました（{s}）")),
         Err(err) => Err(format!("エディタを起動できません（{editor}）: {err}")),
     })
+}
+
+/// ドラッグで選び終えた時の知らせ。
+pub const SELECTED_HINT: &str = "選択しました（Ctrl-cでコピー、Escで解除）";
+
+/// 選択中のキー。`Ctrl-c`で`text`をクリップボードへ送り（選択は残す）、`Esc`で解除する。
+/// 扱ったら`true`。選択が無ければ何もしない（`Ctrl-c`は呼び出し側の終了に回る）。
+pub fn selection_key(
+    drag: &mut Dragger,
+    key: KeyEvent,
+    message: &mut Option<String>,
+    text: impl FnOnce(Selection) -> String,
+) -> Result<bool> {
+    let Some(sel) = drag.selection() else {
+        return Ok(false);
+    };
+    match key.code {
+        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let text = text(sel);
+            copy_to_clipboard(&text)?;
+            *message = Some(format!("コピーしました（{}文字）", text.chars().count()));
+            Ok(true)
+        }
+        KeyCode::Esc => {
+            drag.clear();
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 /// 端末経由でクリップボードへ送る（OSC 52）。
@@ -269,10 +298,15 @@ impl App {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     self.message = None;
-                    self.drag.clear();
-                    match self.key(key) {
-                        Action::None => {}
-                        Action::Edit => self.edit(terminal)?,
+                    let lines = &self.rendered;
+                    if !selection_key(&mut self.drag, key, &mut self.message, |s| {
+                        select::text(&lines.lines, &lines.flow, s)
+                    })? {
+                        self.drag.clear();
+                        match self.key(key) {
+                            Action::None => {}
+                            Action::Edit => self.edit(terminal)?,
+                        }
                     }
                 }
                 Event::Mouse(m) => dirty = self.mouse(m)?,
@@ -282,7 +316,7 @@ impl App {
         Ok(())
     }
 
-    /// マウス。ホイールで本文を動かし、ドラッグで選んだ文字を離した時にクリップボードへ送る。
+    /// マウス。ホイールで本文を動かし、ドラッグで文字を選ぶ（コピーは`Ctrl-c`）。
     /// 画面が変わる時に`true`。
     fn mouse(&mut self, m: MouseEvent) -> Result<bool> {
         let total = self.rendered.lines.len();
@@ -308,13 +342,8 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) if self.drag.is_dragging() => {
-                if let Some(sel) = self.drag.finish() {
-                    let text = select::text(&self.rendered.lines, &self.rendered.flow, sel);
-                    if !text.is_empty() {
-                        copy_to_clipboard(&text)?;
-                        self.message =
-                            Some(format!("コピーしました（{}文字）", text.chars().count()));
-                    }
+                if self.drag.finish().is_some() {
+                    self.message = Some(SELECTED_HINT.to_string());
                 }
             }
             _ => return Ok(false),
