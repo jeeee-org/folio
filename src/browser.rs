@@ -15,7 +15,7 @@ use ratatui::crossterm::event::{
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 use unicode_width::UnicodeWidthStr;
 
@@ -183,6 +183,57 @@ fn list_index_at(inner: Rect, offset: usize, len: usize, at: Position) -> Option
     (index < len).then_some(index)
 }
 
+/// `path`を含むgitリポジトリのルート（`.git`のある一番近いフォルダ）。
+fn git_root(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|d| d.join(".git").exists())
+        .map(Path::to_path_buf)
+}
+
+/// `base`から数えた`path`の相対パス。`base`の外なら`..`を付ける。同じなら`.`。
+fn relative_to(path: &Path, base: &Path) -> String {
+    let p: Vec<_> = path.components().collect();
+    let b: Vec<_> = base.components().collect();
+    let common = p.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let mut out = PathBuf::new();
+    for _ in common..b.len() {
+        out.push("..");
+    }
+    for c in &p[common..] {
+        out.push(c.as_os_str());
+    }
+    if out.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        out.display().to_string()
+    }
+}
+
+/// 右クリックのメニューに並べる、名前とコピーする値。相対パスはgitのルートから、
+/// リポジトリの外なら起動したフォルダ`start`から数える。
+fn path_items(path: &Path, start: &Path) -> Vec<(&'static str, String)> {
+    let base = git_root(path).unwrap_or_else(|| start.to_path_buf());
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    vec![
+        ("絶対パス", path.display().to_string()),
+        ("相対パス", relative_to(path, &base)),
+        ("ファイル名", name),
+    ]
+}
+
+/// メニューの枠`area`の中で、位置`at`にある行。
+fn menu_row_at(area: Rect, len: usize, at: Position) -> Option<usize> {
+    let inner = Block::bordered().inner(area);
+    if !inner.contains(at) {
+        return None;
+    }
+    let row = (at.y - inner.y) as usize;
+    (row < len).then_some(row)
+}
+
 /// 直前のクリック`prev`（時刻と項目）に続けて`index`をクリックしたらダブルクリックか。
 fn is_double_click(prev: Option<(Instant, usize)>, now: Instant, index: usize) -> bool {
     prev.is_some_and(|(at, i)| i == index && now.saturating_duration_since(at) <= DOUBLE_CLICK)
@@ -228,6 +279,20 @@ struct Browser<'c> {
     preview_inner: Rect,
     /// プレビューでのドラッグ選択
     drag: Dragger,
+    /// 起動したフォルダ（gitの外での相対パスの基準）
+    start: PathBuf,
+    /// 右クリックで開いたパスのコピーのメニュー
+    menu: Option<PathMenu>,
+}
+
+/// 右クリックのメニュー。項目のパスを3通りで見せ、選んだものをコピーする。
+struct PathMenu {
+    /// 右クリックした位置（この下に出す）
+    at: Position,
+    items: Vec<(&'static str, String)>,
+    cursor: usize,
+    /// 直前の描画での枠（クリックの判定用）
+    area: Rect,
 }
 
 /// コピー・移動の元。
@@ -256,6 +321,7 @@ impl<'c> Browser<'c> {
             config,
             theme: config.theme()?,
             highlighter: Highlighter::with_theme(&config.highlight.theme),
+            start: cwd.clone(),
             cwd,
             entries: Vec::new(),
             cursor: 0,
@@ -274,6 +340,7 @@ impl<'c> Browser<'c> {
             last_click: None,
             preview_inner: Rect::default(),
             drag: Dragger::default(),
+            menu: None,
         };
         b.reload(None);
         Ok(b)
@@ -298,6 +365,7 @@ impl<'c> Browser<'c> {
         self.preview = None;
         *self.list_state.offset_mut() = 0;
         self.last_click = None;
+        self.menu = None;
     }
 
     fn current(&self) -> Option<&Entry> {
@@ -330,6 +398,17 @@ impl<'c> Browser<'c> {
             return Ok(false);
         }
         let at = Position::new(m.column, m.row);
+        // メニューを開いている間は、行のクリックでコピー、それ以外のクリックで閉じる
+        if let Some(menu) = &self.menu {
+            let MouseEventKind::Down(button) = m.kind else {
+                return Ok(false);
+            };
+            match (button, menu_row_at(menu.area, menu.items.len(), at)) {
+                (MouseButton::Left, Some(row)) => self.copy_menu_item(row)?,
+                _ => self.menu = None,
+            }
+            return Ok(true);
+        }
         match m.kind {
             MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
                 let step = if m.kind == MouseEventKind::ScrollDown {
@@ -344,6 +423,28 @@ impl<'c> Browser<'c> {
                 } else {
                     return Ok(false);
                 }
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                // 一覧の項目を選び、パスのコピーのメニューを出す
+                let Some(index) = list_index_at(
+                    self.list_inner,
+                    self.list_state.offset(),
+                    self.entries.len(),
+                    at,
+                ) else {
+                    return Ok(false);
+                };
+                self.drag.clear();
+                self.message = None;
+                self.pending_g = false;
+                self.last_click = None;
+                self.set_cursor(index);
+                self.menu = Some(PathMenu {
+                    at,
+                    items: path_items(&self.entries[index].path, &self.start),
+                    cursor: 0,
+                    area: Rect::default(),
+                });
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 self.drag.clear();
@@ -403,6 +504,18 @@ impl<'c> Browser<'c> {
         Ok(true)
     }
 
+    /// メニューの`row`行目の値をクリップボードへ送り、メニューを閉じる。
+    fn copy_menu_item(&mut self, row: usize) -> Result<()> {
+        let Some(menu) = self.menu.take() else {
+            return Ok(());
+        };
+        if let Some((label, value)) = menu.items.get(row) {
+            viewer::copy_to_clipboard(value)?;
+            self.message = Some(format!("{label}をコピーしました: {value}"));
+        }
+        Ok(())
+    }
+
     /// プレビューがフォルダの中身の時、画面の位置の行にある項目。
     fn preview_child_at(&self, at: Position) -> Option<Entry> {
         let p = self.preview.as_ref()?;
@@ -434,6 +547,21 @@ impl<'c> Browser<'c> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if self.prompt.is_some() {
             self.prompt_key(key);
+            return Ok(());
+        }
+        // メニュー: j/kで選び、Enterでコピー。それ以外のキーは閉じるだけ
+        if let Some(menu) = &mut self.menu {
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    menu.cursor = (menu.cursor + 1).min(menu.items.len().saturating_sub(1))
+                }
+                KeyCode::Char('k') | KeyCode::Up => menu.cursor = menu.cursor.saturating_sub(1),
+                KeyCode::Enter => {
+                    let row = menu.cursor;
+                    self.copy_menu_item(row)?;
+                }
+                _ => self.menu = None,
+            }
             return Ok(());
         }
         self.message = None;
@@ -757,6 +885,9 @@ impl<'c> Browser<'c> {
         self.draw_list(frame, list);
         self.draw_preview(frame, preview);
         self.draw_status(frame, status);
+        if let Some(menu) = &mut self.menu {
+            draw_menu(frame, menu);
+        }
     }
 
     fn draw_list(&mut self, frame: &mut Frame, area: Rect) {
@@ -948,6 +1079,7 @@ impl<'c> Browser<'c> {
         let right = match &self.prompt {
             Some(Prompt::Trash { .. } | Prompt::Overwrite { .. }) => "y:実行  それ以外:中止 ",
             Some(_) => "Enter:確定  Esc:中止 ",
+            None if self.menu.is_some() => "クリック/Enter:コピー  j/k:選ぶ  Esc:閉じる ",
             None => {
                 "Enter:読む  e:編集  o:外部  a:作成  r:改名  d:ごみ箱  y/x/p:コピー/移動  q:終了 "
             }
@@ -971,6 +1103,41 @@ impl<'c> Browser<'c> {
             area,
         );
     }
+}
+
+/// パスのコピーのメニューを、右クリックした位置の下に重ねて描く。画面からはみ出すなら内側に寄せる。
+fn draw_menu(frame: &mut Frame, menu: &mut PathMenu) {
+    let screen = frame.area();
+    let label_w = menu.items.iter().map(|(l, _)| l.width()).max().unwrap_or(0);
+    let value_w = menu.items.iter().map(|(_, v)| v.width()).max().unwrap_or(0);
+    // 枠2桁＋左右の余白2桁＋名前と値の間2桁
+    let width = ((label_w + value_w + 6) as u16).min(screen.width);
+    let height = (menu.items.len() as u16 + 2).min(screen.height);
+    let x = menu.at.x.min(screen.width.saturating_sub(width));
+    let y = (menu.at.y + 1).min(screen.height.saturating_sub(height));
+    let area = Rect::new(x, y, width, height);
+    menu.area = area;
+    let inner_w = area.width.saturating_sub(2) as usize;
+    let lines: Vec<Line> = menu
+        .items
+        .iter()
+        .enumerate()
+        .map(|(i, (label, value))| {
+            let pad = " ".repeat(label_w - label.width());
+            let text = truncate_display(&format!(" {label}{pad}  {value} "), inner_w);
+            let style = if i == menu.cursor {
+                Style::new().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::new()
+            };
+            Line::from(Span::styled(text, style))
+        })
+        .collect();
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::bordered().title(" パスをコピー ")),
+        area,
+    );
 }
 
 /// 行どうしのつながりを持たない行の列（ディレクトリの中身や、読まない理由）。
@@ -1039,6 +1206,43 @@ mod tests {
         b.ensure_preview(40);
         assert!(b.preview.as_ref().unwrap().children.is_empty());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn relative_path_counts_from_base() {
+        assert_eq!(
+            relative_to(Path::new("/r/src/a.rs"), Path::new("/r")),
+            "src/a.rs"
+        );
+        assert_eq!(relative_to(Path::new("/r/x"), Path::new("/r/src")), "../x");
+        assert_eq!(relative_to(Path::new("/r"), Path::new("/r")), ".");
+    }
+
+    #[test]
+    fn path_items_count_from_git_root_then_start() {
+        let dir = std::env::temp_dir().join(format!("folio-path-items-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("repo/.git")).unwrap();
+        fs::create_dir_all(dir.join("repo/src")).unwrap();
+        fs::create_dir_all(dir.join("other")).unwrap();
+        let in_repo = dir.join("repo/src/a.rs");
+        let items = path_items(&in_repo, &dir.join("other"));
+        assert_eq!(items[0], ("絶対パス", in_repo.display().to_string()));
+        assert_eq!(items[1], ("相対パス", "src/a.rs".to_string()));
+        assert_eq!(items[2], ("ファイル名", "a.rs".to_string()));
+        // リポジトリの外は起動したフォルダから
+        let outside = dir.join("other/b.txt");
+        assert_eq!(path_items(&outside, &dir).get(1).unwrap().1, "other/b.txt");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn menu_row_is_inside_the_border() {
+        let area = Rect::new(10, 5, 30, 5); // 枠の中は3行
+        assert_eq!(menu_row_at(area, 3, Position::new(12, 6)), Some(0));
+        assert_eq!(menu_row_at(area, 3, Position::new(12, 8)), Some(2));
+        assert_eq!(menu_row_at(area, 3, Position::new(12, 5)), None);
+        assert_eq!(menu_row_at(area, 3, Position::new(5, 6)), None);
     }
 
     #[test]
