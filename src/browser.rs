@@ -5,10 +5,14 @@
 use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
@@ -24,6 +28,9 @@ use crate::viewer;
 
 /// プレビューで読む上限（バイト）。これより大きいファイルは読まない。
 pub const PREVIEW_MAX_BYTES: u64 = 1024 * 1024;
+
+/// 同じ項目への2回のクリックをダブルクリックとみなす間隔。
+const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 
 /// 一覧の1項目。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,9 +164,26 @@ pub fn run(start: &Path, config: &Config) -> Result<PathBuf> {
     let start =
         fs::canonicalize(start).with_context(|| format!("{}が見つかりません", start.display()))?;
     let mut terminal = ratatui::init();
-    let result = Browser::new(start, config).and_then(|mut b| b.run(&mut terminal));
+    let result = viewer::set_mouse_capture(true)
+        .and_then(|()| Browser::new(start, config))
+        .and_then(|mut b| b.run(&mut terminal));
+    let _ = viewer::set_mouse_capture(false);
     ratatui::restore();
     result
+}
+
+/// 一覧の中身の領域`inner`で、画面の位置`at`にある項目の添字。`offset`は一覧の表示の先頭。
+fn list_index_at(inner: Rect, offset: usize, len: usize, at: Position) -> Option<usize> {
+    if !inner.contains(at) {
+        return None;
+    }
+    let index = offset + (at.y - inner.y) as usize;
+    (index < len).then_some(index)
+}
+
+/// 直前のクリック`prev`（時刻と項目）に続けて`index`をクリックしたらダブルクリックか。
+fn is_double_click(prev: Option<(Instant, usize)>, now: Instant, index: usize) -> bool {
+    prev.is_some_and(|(at, i)| i == index && now.saturating_duration_since(at) <= DOUBLE_CLICK)
 }
 
 /// 右ペインの状態。カーソルの項目が変わった時だけ作り直す。
@@ -187,6 +211,14 @@ struct Browser<'c> {
     prompt: Option<Prompt>,
     /// `y`/`x`で覚えた項目
     clip: Option<Clip>,
+    /// 一覧の表示位置（スクロール）。クリックの行から項目を求めるのに使う
+    list_state: ListState,
+    /// 直前の描画での一覧（上端はパスの行）・一覧の中身・プレビューの領域
+    list_area: Rect,
+    list_inner: Rect,
+    preview_area: Rect,
+    /// 直前のクリック（ダブルクリックの判定用）
+    last_click: Option<(Instant, usize)>,
 }
 
 /// コピー・移動の元。
@@ -226,6 +258,11 @@ impl<'c> Browser<'c> {
             quit: false,
             prompt: None,
             clip: None,
+            list_state: ListState::default(),
+            list_area: Rect::default(),
+            list_inner: Rect::default(),
+            preview_area: Rect::default(),
+            last_click: None,
         };
         b.reload(None);
         Ok(b)
@@ -248,6 +285,8 @@ impl<'c> Browser<'c> {
             .unwrap_or(0)
             .min(self.entries.len().saturating_sub(1));
         self.preview = None;
+        *self.list_state.offset_mut() = 0;
+        self.last_click = None;
     }
 
     fn current(&self) -> Option<&Entry> {
@@ -255,15 +294,73 @@ impl<'c> Browser<'c> {
     }
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<PathBuf> {
+        let mut dirty = true;
         while !self.quit {
-            terminal.draw(|frame| self.draw(frame))?;
-            if let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-            {
-                self.key(terminal, key)?;
+            if dirty {
+                terminal.draw(|frame| self.draw(frame))?;
             }
+            dirty = match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    self.key(terminal, key)?;
+                    true
+                }
+                // ポインタを動かしただけの時などは描き直さない
+                Event::Mouse(m) => self.mouse(terminal, m)?,
+                _ => true,
+            };
         }
         Ok(self.cwd.clone())
+    }
+
+    /// マウス。1回のクリックで選び、同じ項目をもう1回で開く。パスの行のクリックで親へ。
+    /// ホイールはポインタの下の欄を動かす。画面が変わる時に`true`。入力・確認中は無視する。
+    fn mouse(&mut self, terminal: &mut DefaultTerminal, m: MouseEvent) -> Result<bool> {
+        if self.prompt.is_some() {
+            return Ok(false);
+        }
+        let at = Position::new(m.column, m.row);
+        match m.kind {
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                let step = if m.kind == MouseEventKind::ScrollDown {
+                    viewer::WHEEL_STEP
+                } else {
+                    -viewer::WHEEL_STEP
+                };
+                if self.preview_area.contains(at) {
+                    self.scroll_preview(step);
+                } else if self.list_area.contains(at) {
+                    self.move_cursor(step);
+                } else {
+                    return Ok(false);
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.list_area.contains(at) && at.y == self.list_area.y {
+                    self.message = None;
+                    self.go_parent();
+                } else if let Some(index) = list_index_at(
+                    self.list_inner,
+                    self.list_state.offset(),
+                    self.entries.len(),
+                    at,
+                ) {
+                    let now = Instant::now();
+                    self.message = None;
+                    self.pending_g = false;
+                    self.set_cursor(index);
+                    if is_double_click(self.last_click, now, index) {
+                        self.last_click = None;
+                        self.open(terminal)?;
+                    } else {
+                        self.last_click = Some((now, index));
+                    }
+                } else {
+                    return Ok(false);
+                }
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
     }
 
     fn key(&mut self, terminal: &mut DefaultTerminal, key: KeyEvent) -> Result<()> {
@@ -575,12 +672,14 @@ impl<'c> Browser<'c> {
         let [list, preview] =
             Layout::horizontal([Constraint::Length(list_width), Constraint::Fill(1)]).areas(main);
         self.list_height = list.height.max(1) as usize;
+        self.list_area = list;
+        self.preview_area = preview;
         self.draw_list(frame, list);
         self.draw_preview(frame, preview);
         self.draw_status(frame, status);
     }
 
-    fn draw_list(&self, frame: &mut Frame, area: Rect) {
+    fn draw_list(&mut self, frame: &mut Frame, area: Rect) {
         let items: Vec<ListItem> = if self.entries.is_empty() {
             vec![ListItem::new("（空）").dim()]
         } else {
@@ -604,15 +703,16 @@ impl<'c> Browser<'c> {
                 .collect()
         };
         let title = format!(" {} ", shorten_home(&self.cwd));
+        let block = Block::new().borders(Borders::RIGHT).title(title);
+        self.list_inner = block.inner(area);
         let list = List::new(items)
-            .block(Block::new().borders(Borders::RIGHT).title(title))
+            .block(block)
             .highlight_style(Style::new().add_modifier(Modifier::REVERSED))
             .highlight_symbol("▸");
-        let mut state = ListState::default();
-        if !self.entries.is_empty() {
-            state.select(Some(self.cursor));
-        }
-        frame.render_stateful_widget(list, area, &mut state);
+        // 表示位置を持ち越す（毎回0から数えると、クリックした行と項目が合わなくなる）
+        self.list_state
+            .select((!self.entries.is_empty()).then_some(self.cursor));
+        frame.render_stateful_widget(list, area, &mut self.list_state);
     }
 
     fn draw_preview(&mut self, frame: &mut Frame, area: Rect) {
@@ -622,12 +722,14 @@ impl<'c> Browser<'c> {
             ..area
         };
         self.ensure_preview(inner.width);
-        let Some(p) = &self.preview else {
+        let Some(p) = &mut self.preview else {
             return;
         };
         let height = inner.height as usize;
         let max_scroll = p.lines.len().saturating_sub(height);
-        let scroll = p.scroll.min(max_scroll);
+        // 末尾を越えた分は捨てる（越えたまま持つと、戻すのに余分に回すことになる）
+        p.scroll = p.scroll.min(max_scroll);
+        let scroll = p.scroll;
         let end = (scroll + height).min(p.lines.len());
         let text = Text::from(p.lines[scroll..end].to_vec());
         frame.render_widget(Paragraph::new(text), inner);
@@ -801,6 +903,39 @@ fn shorten_home(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn click_row_maps_to_entry_with_offset() {
+        // 一覧の中身が2行目から5行（パスの行が1行目）、表示の先頭が10件目
+        let inner = Rect::new(0, 1, 30, 5);
+        assert_eq!(list_index_at(inner, 10, 100, Position::new(3, 1)), Some(10));
+        assert_eq!(list_index_at(inner, 10, 100, Position::new(3, 5)), Some(14));
+        // パスの行・中身の外・項目の無い行
+        assert_eq!(list_index_at(inner, 10, 100, Position::new(3, 0)), None);
+        assert_eq!(list_index_at(inner, 10, 100, Position::new(30, 2)), None);
+        assert_eq!(list_index_at(inner, 0, 2, Position::new(3, 3)), None);
+    }
+
+    #[test]
+    fn double_click_needs_same_entry_within_interval() {
+        let t = Instant::now();
+        assert!(!is_double_click(None, t, 3));
+        assert!(is_double_click(
+            Some((t, 3)),
+            t + Duration::from_millis(300),
+            3
+        ));
+        assert!(!is_double_click(
+            Some((t, 2)),
+            t + Duration::from_millis(300),
+            3
+        ));
+        assert!(!is_double_click(
+            Some((t, 3)),
+            t + Duration::from_millis(900),
+            3
+        ));
+    }
 
     #[test]
     fn natural_order_compares_numbers_and_ignores_case() {

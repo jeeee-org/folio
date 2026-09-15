@@ -4,9 +4,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEventKind,
+};
+use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
@@ -26,6 +31,24 @@ const HANG_RESERVE: u16 = 2;
 
 /// 目次ペインの幅。画面の1/4か、この最小幅の広い方。
 const TOC_MIN_WIDTH: u16 = 24;
+
+/// ホイール1回で動かす行数（項目数）。
+pub const WHEEL_STEP: isize = 3;
+
+/// 端末にマウスを受け取らせているか。エディタに渡す間だけ止めて戻すために覚えておく。
+static MOUSE_CAPTURE: AtomicBool = AtomicBool::new(false);
+
+/// マウスの受け取りを入れる／切る。受け取る間は、端末の文字選択が`Shift`+ドラッグに変わる。
+pub fn set_mouse_capture(on: bool) -> Result<()> {
+    let mut out = std::io::stdout();
+    if on {
+        execute!(out, EnableMouseCapture)?;
+    } else {
+        execute!(out, DisableMouseCapture)?;
+    }
+    MOUSE_CAPTURE.store(on, Ordering::Relaxed);
+    Ok(())
+}
 
 /// `folio render <path>`の本体。TUIを開かず、ANSI付きの行を標準出力に流す。
 /// yaziのプレビュー欄（piper経由）や`less -R`から使う。
@@ -88,6 +111,11 @@ pub fn open_editor(terminal: &mut DefaultTerminal, path: &Path) -> Result<Result
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .unwrap_or_else(|_| "vim".to_string());
+    // 受け取ったままだと、クリックが文字列としてエディタに届く
+    let mouse = MOUSE_CAPTURE.load(Ordering::Relaxed);
+    if mouse {
+        set_mouse_capture(false)?;
+    }
     ratatui::restore();
     // $EDITORは引数付きのこともある（`code -w`など）ので、シェルに展開させる
     let status = Command::new("sh")
@@ -97,6 +125,9 @@ pub fn open_editor(terminal: &mut DefaultTerminal, path: &Path) -> Result<Result
         .arg(path)
         .status();
     *terminal = ratatui::init();
+    if mouse {
+        set_mouse_capture(true)?;
+    }
     terminal.clear()?;
     Ok(match status {
         Ok(s) if s.success() => Ok(()),
@@ -211,16 +242,27 @@ impl App {
     }
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        let mut dirty = true;
         while !self.quit {
-            terminal.draw(|frame| self.draw(frame))?;
-            if let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-            {
-                self.message = None;
-                match self.key(key) {
-                    Action::None => {}
-                    Action::Edit => self.edit(terminal)?,
+            if dirty {
+                terminal.draw(|frame| self.draw(frame))?;
+            }
+            dirty = true;
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    self.message = None;
+                    match self.key(key) {
+                        Action::None => {}
+                        Action::Edit => self.edit(terminal)?,
+                    }
                 }
+                // マウスはファイラーから開いた時だけ届く。ホイールで本文を動かす
+                Event::Mouse(m) => match m.kind {
+                    MouseEventKind::ScrollDown => self.scroll_by(WHEEL_STEP),
+                    MouseEventKind::ScrollUp => self.scroll_by(-WHEEL_STEP),
+                    _ => dirty = false,
+                },
+                _ => {}
             }
         }
         Ok(())
