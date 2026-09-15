@@ -18,6 +18,7 @@ P8（ファイラーのマウス操作）を2026-09-15に完了（Windows Termin
 
 ## 完了
 
+- [x] 2026-09-15 TUIの動作確認スクリプト`scripts/tuidrive.py`（tmuxでキー・マウスを送り、画面・反転範囲・クリップボードを読む。テスト付き） → [checkpoint](checkpoints/2026-09-15-TUI確認スクリプト.md)
 - [x] 2026-09-15 P8完了: クリックで選ぶ・開く、ホイール、ドラッグで選んでCtrl-cでコピー、プレビューのフォルダをクリックで開く、右クリックでパスをコピー → checkpoints/2026-09-15-{マウス操作のスコープ,マウス操作}.md
 - [x] 2026-09-15 リモートを`jeeee4/folio`から`jeeee-org/folio`へ移管 → [checkpoint](checkpoints/2026-09-15-リモートの移管.md)
 - [x] 2026-09-09 PJ初期構成 → [checkpoint](checkpoints/2026-09-09-初期構成.md)

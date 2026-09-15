@@ -151,3 +151,16 @@ cargo run -- view path/to/file.md
 cargo test
 cargo fmt && cargo clippy -- -D warnings
 ```
+
+画面の動作確認は`scripts/tuidrive.py`で、tmuxの中でfolioを動かし、キーとマウスを送って画面とクリップボードを読む（座標は「桁 行」、1始まり）。
+
+```bash
+scripts/tuidrive.py start --size 140x24 -- target/debug/folio browse src
+scripts/tuidrive.py click $(scripts/tuidrive.py find select.rs) --right   # 右クリック
+scripts/tuidrive.py click $(scripts/tuidrive.py find 相対パス)            # メニューの行
+scripts/tuidrive.py clipboard          # OSC 52で送られた文字 → src/select.rs
+scripts/tuidrive.py drag 20 4 90 6     # ドラッグ。wheel down 50 5 / key j Enter C-c / type abc
+scripts/tuidrive.py screen --reversed  # 反転している範囲。alive で動作中か
+scripts/tuidrive.py stop
+python3 -m unittest discover -s scripts   # スクリプト自体のテスト
+```
