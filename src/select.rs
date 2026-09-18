@@ -9,7 +9,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use unicode_width::UnicodeWidthChar;
 
-use crate::render::{Flow, Joint};
+use crate::render::{self, Cell, Flow, Joint, TableSpan};
 use crate::search;
 
 /// 描画後の行の中の位置。`col`は行頭からの桁（表示幅）。
@@ -24,9 +24,20 @@ pub struct Point {
 pub struct Selection {
     pub anchor: Point,
     pub head: Point,
+    /// 表のセルの中で始めた選択。その時は範囲をこのセルの矩形に閉じ込める
+    pub cell: Option<Cell>,
 }
 
 impl Selection {
+    /// 表を持たない範囲選択（表以外の本文と、テストから使う）。
+    pub fn new(anchor: Point, head: Point) -> Self {
+        Self {
+            anchor,
+            head,
+            cell: None,
+        }
+    }
+
     fn ordered(&self) -> (Point, Point) {
         if self.anchor <= self.head {
             (self.anchor, self.head)
@@ -45,11 +56,18 @@ pub struct Dragger {
 }
 
 impl Dragger {
-    pub fn begin(&mut self, at: Point) {
+    /// ドラッグを始める。`cell`が`Some`なら、範囲はそのセルの外へ広がらない。
+    pub fn begin(&mut self, at: Point, cell: Option<Cell>) {
+        // 罫線の左右の空白で押した時に備えて、始点もセルの中へ寄せる
+        let at = match cell {
+            Some(cell) => clamp_into(cell, at),
+            None => at,
+        };
         *self = Self {
             selection: Some(Selection {
                 anchor: at,
                 head: at,
+                cell,
             }),
             dragging: true,
             moved: false,
@@ -64,11 +82,15 @@ impl Dragger {
         if !self.dragging {
             return;
         }
-        if let Some(s) = &mut self.selection
-            && s.head != at
-        {
-            s.head = at;
-            self.moved = true;
+        if let Some(s) = &mut self.selection {
+            let at = match s.cell {
+                Some(cell) => clamp_into(cell, at),
+                None => at,
+            };
+            if s.head != at {
+                s.head = at;
+                self.moved = true;
+            }
         }
     }
 
@@ -135,6 +157,9 @@ pub fn chars_in_line(
         return None;
     }
     let chars: Vec<char> = search::plain(line).chars().collect();
+    if let Some(cell) = sel.cell {
+        return chars_in_cell(&chars, cell, start, end, i);
+    }
     let content_end = chars
         .iter()
         .rposition(|c| !c.is_whitespace())
@@ -156,15 +181,67 @@ pub fn chars_in_line(
     (from < to).then_some((from, to))
 }
 
+/// 表のセルの中に閉じ込めた時の、行`i`の文字の範囲。
+/// 桁はセルの左右で頭打ちにし、幅を揃えるためにセルの右へ足した空白は含めない。
+fn chars_in_cell(
+    chars: &[char],
+    cell: Cell,
+    start: Point,
+    end: Point,
+    i: usize,
+) -> Option<(usize, usize)> {
+    if !(cell.lines.0..cell.lines.1).contains(&i) {
+        return None;
+    }
+    let lo = if i == start.line {
+        start.col.max(cell.cols.0)
+    } else {
+        cell.cols.0
+    };
+    let hi = if i == end.line {
+        end.col.saturating_add(1).min(cell.cols.1)
+    } else {
+        cell.cols.1
+    };
+    let from = char_at(chars, lo);
+    let mut to = char_at(chars, hi);
+    while to > from && chars[to - 1].is_whitespace() {
+        to -= 1;
+    }
+    (from < to).then_some((from, to))
+}
+
+/// 位置`p`をセル`cell`の矩形の中へ寄せる。
+fn clamp_into(cell: Cell, p: Point) -> Point {
+    Point {
+        line: p.line.clamp(cell.lines.0, cell.lines.1.saturating_sub(1)),
+        col: p.col.clamp(cell.cols.0, cell.cols.1.saturating_sub(1)),
+    }
+}
+
 /// 選んだ範囲の文字列。折り返しで分かれた行はつなぎ、原文で分かれた行は改行で区切る。
-pub fn text(lines: &[Line<'_>], flow: &[Flow], sel: Selection) -> String {
+/// 表のセルに閉じ込めた選択は、そのセルの中の折り返しをつないで1行にする。
+pub fn text(lines: &[Line<'_>], flow: &[Flow], tables: &[TableSpan], sel: Selection) -> String {
     let (start, end) = sel.ordered();
     let mut out = String::new();
     if lines.is_empty() {
         return out;
     }
     let last = end.line.min(lines.len() - 1);
+    let mut wrote = false;
     for (i, line) in lines.iter().enumerate().take(last + 1).skip(start.line) {
+        let picked = chars_in_line(line, flow, sel, i);
+        // セルの中は改行を持たないので、折り返しをつないで1行にする。中身の無い行
+        // （そのセルより背の高い列に合わせた空白）は、つなぎ目ごと飛ばす
+        if let Some(cell) = sel.cell {
+            let Some((from, to)) = picked else { continue };
+            if wrote && render::cell_joint(tables, cell, i - 1) == Joint::SoftSpace {
+                out.push(' ');
+            }
+            out.extend(search::plain(line).chars().skip(from).take(to - from));
+            wrote = true;
+            continue;
+        }
         if i > start.line {
             out.push_str(match flow.get(i - 1).map(|f| f.joint) {
                 Some(Joint::Soft) => "",
@@ -172,7 +249,7 @@ pub fn text(lines: &[Line<'_>], flow: &[Flow], sel: Selection) -> String {
                 _ => "\n",
             });
         }
-        if let Some((from, to)) = chars_in_line(line, flow, sel, i) {
+        if let Some((from, to)) = picked {
             out.extend(search::plain(line).chars().skip(from).take(to - from));
         }
     }
@@ -238,16 +315,16 @@ mod tests {
     }
 
     fn sel(a: (usize, usize), b: (usize, usize)) -> Selection {
-        Selection {
-            anchor: Point {
+        Selection::new(
+            Point {
                 line: a.0,
                 col: a.1,
             },
-            head: Point {
+            Point {
                 line: b.0,
                 col: b.1,
             },
-        }
+        )
     }
 
     #[test]
@@ -256,7 +333,7 @@ mod tests {
         // aaa bbb / ccc ddd / 空 / あいうえ / おかきく / けこ
         let all = sel((0, 0), (r.lines.len() - 1, 99));
         assert_eq!(
-            text(&r.lines, &r.flow, all),
+            text(&r.lines, &r.flow, &r.tables, all),
             "aaa bbb ccc ddd\n\nあいうえおかきくけこ"
         );
     }
@@ -266,15 +343,24 @@ mod tests {
         let r = rendered("- one two three four\n\n```\nabc\n```", 12);
         // • one two /   three four / 空 / abc（背景の空白で埋まる）
         let all = sel((0, 0), (3, 99));
-        assert_eq!(text(&r.lines, &r.flow, all), "• one two three four\n\nabc");
+        assert_eq!(
+            text(&r.lines, &r.flow, &r.tables, all),
+            "• one two three four\n\nabc"
+        );
     }
 
     #[test]
     fn partial_selection_uses_display_columns_and_any_direction() {
         let r = rendered("あいうえお", 20);
         // 桁2〜5は「い」「う」。逆向きのドラッグでも同じ
-        assert_eq!(text(&r.lines, &r.flow, sel((0, 2), (0, 5))), "いう");
-        assert_eq!(text(&r.lines, &r.flow, sel((0, 5), (0, 2))), "いう");
+        assert_eq!(
+            text(&r.lines, &r.flow, &r.tables, sel((0, 2), (0, 5))),
+            "いう"
+        );
+        assert_eq!(
+            text(&r.lines, &r.flow, &r.tables, sel((0, 5), (0, 2))),
+            "いう"
+        );
         // 行より右を押しても行末まで
         assert_eq!(
             chars_in_line(&r.lines[0], &r.flow, sel((0, 6), (0, 40)), 0),
@@ -314,12 +400,80 @@ mod tests {
     #[test]
     fn click_without_move_selects_nothing() {
         let mut d = Dragger::default();
-        d.begin(Point { line: 1, col: 1 });
+        d.begin(Point { line: 1, col: 1 }, None);
         assert_eq!(d.finish(), None);
-        d.begin(Point { line: 1, col: 1 });
+        d.begin(Point { line: 1, col: 1 }, None);
         d.extend(Point { line: 2, col: 3 });
         assert!(d.finish().is_some());
         assert!(!d.is_dragging() && d.selection().is_some());
+    }
+
+    /// 表: ID列(0..4) │ 状態列(7..18)。Q001の状態は2行に折り返る
+    fn table() -> crate::render::Rendered {
+        rendered(
+            "| ID | 状態 |\n|---|---|\n| Q001 | aaa bbb ccc ddd eee |\n| Q002 | 短い |\n",
+            18,
+        )
+    }
+
+    fn drag_from(r: &crate::render::Rendered, at: (usize, usize), to: (usize, usize)) -> Selection {
+        let start = Point {
+            line: at.0,
+            col: at.1,
+        };
+        let mut d = Dragger::default();
+        d.begin(start, render::cell_at(&r.tables, start.line, start.col));
+        d.extend(Point {
+            line: to.0,
+            col: to.1,
+        });
+        d.finish().unwrap()
+    }
+
+    #[test]
+    fn drag_started_in_a_cell_stays_in_that_cell() {
+        let r = table();
+        // 状態列の中で始めて、左下（ID列・表の外の行）へ引いてもセルの中で止まる
+        let s = drag_from(&r, (2, 7), (9, 0));
+        assert_eq!(s.head, Point { line: 3, col: 7 });
+        // 区切り線と罫線の上はどのセルにも属さない（これまでどおりの選択に落ちる）
+        assert!(render::cell_at(&r.tables, 1, 8).is_none());
+        assert!(render::cell_at(&r.tables, 2, 5).is_none());
+        // 罫線の左右の空白は、見た目どおり隣のセルの一部
+        assert_eq!(render::cell_at(&r.tables, 2, 4).map(|c| c.col), Some(0));
+        assert_eq!(render::cell_at(&r.tables, 2, 6).map(|c| c.col), Some(1));
+    }
+
+    #[test]
+    fn copying_a_cell_joins_its_wrap_and_leaves_other_columns_out() {
+        let r = table();
+        // セルの全体（右下へ大きく引く）。折り返しはつながり、幅を揃える空白は入らない
+        let s = drag_from(&r, (2, 7), (9, 99));
+        let got = text(&r.lines, &r.flow, &r.tables, s);
+        assert_eq!(got, "aaa bbb ccc ddd eee");
+        assert!(!got.contains("Q001"));
+        // 逆向きに引いても同じ
+        let back = drag_from(&r, (3, 17), (0, 0));
+        assert_eq!(text(&r.lines, &r.flow, &r.tables, back), got);
+    }
+
+    #[test]
+    fn short_cell_does_not_pick_up_the_blank_rows_below_it() {
+        let r = table();
+        // ID列のQ001は1行だけ。状態列に合わせた高さの空白行まで引いても改行は付かない
+        let s = drag_from(&r, (2, 0), (9, 3));
+        assert_eq!(text(&r.lines, &r.flow, &r.tables, s), "Q001");
+    }
+
+    #[test]
+    fn selecting_part_of_a_cell_cuts_at_the_column() {
+        let r = table();
+        // 1行目の途中から2行目の1文字目まで。行をまたぐ所は折り返しの空白でつなぐ
+        let s = drag_from(&r, (2, 11), (3, 7));
+        assert_eq!(text(&r.lines, &r.flow, &r.tables, s), "bbb ccc d");
+        // 表以外（見出しや段落）はこれまでどおり、セルに閉じ込めない
+        let plain = rendered("aaa bbb", 20);
+        assert!(render::cell_at(&plain.tables, 0, 0).is_none());
     }
 
     #[test]

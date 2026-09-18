@@ -300,7 +300,7 @@ impl App {
                     self.message = None;
                     let lines = &self.rendered;
                     if !selection_key(&mut self.drag, key, &mut self.message, |s| {
-                        select::text(&lines.lines, &lines.flow, s)
+                        select::text(&lines.lines, &lines.flow, &lines.tables, s)
                     })? {
                         self.drag.clear();
                         match self.key(key) {
@@ -328,7 +328,9 @@ impl App {
                 let point = select::point_at(self.body, self.scroll, total, m.column, m.row);
                 match point {
                     Some(p) if self.body.contains(Position::new(m.column, m.row)) => {
-                        self.drag.begin(p)
+                        // 表のセルの中で始めたドラッグは、そのセルから出さない
+                        let cell = render::cell_at(&self.rendered.tables, p.line, p.col);
+                        self.drag.begin(p, cell)
                     }
                     _ => self.drag.clear(),
                 }

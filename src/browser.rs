@@ -23,7 +23,7 @@ use crate::config::Config;
 use crate::fileops;
 use crate::format::Format;
 use crate::highlight::Highlighter;
-use crate::render::{self, Flow, Options, Rendered, Theme};
+use crate::render::{self, Flow, Options, Rendered, TableSpan, Theme};
 use crate::search;
 use crate::select::{self, Dragger};
 use crate::viewer;
@@ -245,6 +245,8 @@ struct Preview {
     width: u16,
     lines: Vec<Line<'static>>,
     flow: Vec<Flow>,
+    /// 描いた表の位置（ドラッグをセルに閉じ込めるのに使う）
+    tables: Vec<TableSpan>,
     scroll: usize,
     /// フォルダの中身のプレビューなら、その項目（行と同じ順）。ファイルなら空
     children: Vec<Entry>,
@@ -462,7 +464,12 @@ impl<'c> Browser<'c> {
                         }
                     } else if let Some(p) = self.preview_point(at) {
                         // ファイルの中身: 文字を選び始める
-                        self.drag.begin(p);
+                        // 表のセルの中で始めたドラッグは、そのセルから出さない
+                        let cell = self
+                            .preview
+                            .as_ref()
+                            .and_then(|v| render::cell_at(&v.tables, p.line, p.col));
+                        self.drag.begin(p, cell);
                     }
                 } else if self.list_area.contains(at) && at.y == self.list_area.y {
                     self.message = None;
@@ -568,7 +575,7 @@ impl<'c> Browser<'c> {
         // プレビューで選んでいれば、Ctrl-cはコピー・Escは解除（終了や忘れるより先）
         if let Some(p) = &self.preview
             && viewer::selection_key(&mut self.drag, key, &mut self.message, |s| {
-                select::text(&p.lines, &p.flow, s)
+                select::text(&p.lines, &p.flow, &p.tables, s)
             })?
         {
             return Ok(());
@@ -976,7 +983,15 @@ impl<'c> Browser<'c> {
             .filter(|p| p.path == entry.path)
             .map(|p| p.scroll)
             .unwrap_or(0);
-        let (Rendered { lines, flow, .. }, children) = self.build_preview(&entry, width);
+        let (
+            Rendered {
+                lines,
+                flow,
+                tables,
+                ..
+            },
+            children,
+        ) = self.build_preview(&entry, width);
         // 描き直すと行の位置が変わるので、選択は捨てる
         self.drag.clear();
         self.preview = Some(Preview {
@@ -984,6 +999,7 @@ impl<'c> Browser<'c> {
             width,
             lines,
             flow,
+            tables,
             scroll,
             children,
         });

@@ -67,6 +67,66 @@ pub struct Rendered {
     pub headings: Vec<Heading>,
     /// `lines`と同じ長さ。選んだ文字をコピーする時に、折り返しをつなぎ直すのに使う
     pub flow: Vec<Flow>,
+    /// 描いた表の位置。ドラッグを1つのセルに閉じ込めるのに使う
+    pub tables: Vec<TableSpan>,
+}
+
+/// 描画後の表1つの位置。行は`Rendered::lines`の添字、桁は行頭からの表示幅。
+#[derive(Debug, Clone, Default)]
+pub struct TableSpan {
+    /// 表の最初の行（`joints`の添字の基準）
+    pub base: usize,
+    /// 各列が占める桁の範囲`[from, to)`。列の区切り`" │ "`は含まない
+    pub cols: Vec<(usize, usize)>,
+    /// 見出し行と本体の各行が占める行の範囲`[from, to)`。区切り線は含まない
+    pub rows: Vec<(usize, usize)>,
+    /// `base`からの相対行 × 列。そのセルの中で次の行へどうつなぐか
+    pub joints: Vec<Vec<Joint>>,
+}
+
+/// 表のセル1つが占める矩形。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cell {
+    /// 描画後の行の範囲`[from, to)`
+    pub lines: (usize, usize),
+    /// 桁の範囲`[from, to)`
+    pub cols: (usize, usize),
+    /// どの表の何列目か（セル内の折り返しのつなぎ方を引くのに使う）
+    pub table: usize,
+    pub col: usize,
+}
+
+/// 描画後の位置`(line, col)`にある表のセル。表の外・区切り線・罫線`│`の上なら`None`。
+///
+/// 列の区切り`" │ "`の左右の空白は、見た目どおり隣のセルの一部として扱う（そこを押した時に
+/// 表の外と同じ選択に落ちると、行が丸ごと選ばれて驚くため）。
+pub fn cell_at(tables: &[TableSpan], line: usize, col: usize) -> Option<Cell> {
+    let (table, span) = tables
+        .iter()
+        .enumerate()
+        .find(|(_, s)| s.rows.iter().any(|&(f, t)| (f..t).contains(&line)))?;
+    let lines = *span.rows.iter().find(|&&(f, t)| (f..t).contains(&line))?;
+    let (col_index, &cols) = span
+        .cols
+        .iter()
+        .enumerate()
+        .find(|&(_, &(f, t))| (f.saturating_sub(1)..t + 1).contains(&col))?;
+    Some(Cell {
+        lines,
+        cols,
+        table,
+        col: col_index,
+    })
+}
+
+/// セル`cell`の`line`行目から次の行へのつなぎ方。セルの最後の行なら[`Joint::Hard`]。
+pub fn cell_joint(tables: &[TableSpan], cell: Cell, line: usize) -> Joint {
+    tables
+        .get(cell.table)
+        .and_then(|s| s.joints.get(line.checked_sub(s.base)?))
+        .and_then(|row| row.get(cell.col))
+        .copied()
+        .unwrap_or(Joint::Hard)
 }
 
 /// 1行の、行頭の飾りの長さと、次の行へのつながり。
@@ -126,6 +186,7 @@ pub fn render_with(
         lines: Vec::new(),
         headings: Vec::new(),
         flow: Vec::new(),
+        tables: Vec::new(),
     };
     renderer.blocks(blocks, &Prefix::default(), false);
     while renderer.lines.last().is_some_and(is_blank) {
@@ -136,6 +197,7 @@ pub fn render_with(
         lines: renderer.lines,
         headings: renderer.headings,
         flow: renderer.flow,
+        tables: renderer.tables,
     }
 }
 
@@ -180,6 +242,7 @@ struct Renderer<'t> {
     lines: Vec<Line<'static>>,
     headings: Vec<Heading>,
     flow: Vec<Flow>,
+    tables: Vec<TableSpan>,
 }
 
 impl Renderer<'_> {
@@ -412,28 +475,34 @@ impl Renderer<'_> {
         let border = self.theme.table_border;
         let empty: Vec<Inline> = Vec::new();
 
-        // 1行分のセル群を、セル内折り返しを含めて何行かの描画行にする（emitは呼び出し側）
+        // 1行分のセル群を、セル内折り返しを含めて何行かの描画行にする（emitは呼び出し側）。
+        // 返すのは行ごとの(スパン, 列ごとのつなぎ方)。つなぎ方はセル単位のコピーで使う
         let theme = self.theme;
-        let render_row = |row: &[Vec<Inline>], base: Style| -> Vec<Vec<Span<'static>>> {
-            let cells: Vec<Vec<Vec<Span<'static>>>> = (0..ncols)
+        let render_row = |row: &[Vec<Inline>],
+                          base: Style|
+         -> Vec<(Vec<Span<'static>>, Vec<Joint>)> {
+            let cells: Vec<Vec<(Vec<Span<'static>>, Joint)>> = (0..ncols)
                 .map(|c| {
                     let cell = row.get(c).unwrap_or(&empty);
                     // 表のセル内の折り返しは表の行として扱う（つなぐと列が混ざる）
                     wrap_inlines_opts(cell, widths[c], base, theme, false, false)
-                        .into_iter()
-                        .map(|(spans, _)| spans)
-                        .collect()
                 })
                 .collect();
             let height = cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
             (0..height)
                 .map(|k| {
                     let mut spans = Vec::new();
+                    let mut joints = Vec::with_capacity(ncols);
                     for c in 0..ncols {
                         if c > 0 {
                             spans.push(Span::styled(" │ ", border));
                         }
-                        let line = cells[c].get(k).cloned().unwrap_or_default();
+                        // セルの最後の行と、その列に行が無い場合は次へつながない
+                        joints.push(match cells[c].get(k) {
+                            Some(&(_, joint)) if k + 1 < cells[c].len() => joint,
+                            _ => Joint::Hard,
+                        });
+                        let line = cells[c].get(k).map(|(l, _)| l.clone()).unwrap_or_default();
                         let w: usize = line.iter().map(|sp| sp.content.width()).sum();
                         let pad = widths[c].saturating_sub(w);
                         let (left, right) = match aligns.get(c).copied().unwrap_or(Align::Left) {
@@ -449,18 +518,33 @@ impl Renderer<'_> {
                             spans.push(Span::raw(" ".repeat(right)));
                         }
                     }
-                    spans
+                    (spans, joints)
                 })
                 .collect()
         };
 
-        for (k, spans) in render_row(header, self.theme.table_header)
+        // 各列が行頭から何桁目に来るか。ドラッグをセルに閉じ込めるのに使う
+        let mut span = TableSpan {
+            base: self.lines.len(),
+            cols: Vec::with_capacity(ncols),
+            ..TableSpan::default()
+        };
+        let mut x = prefix.width();
+        for w in &widths {
+            span.cols.push((x, x + w));
+            x += w + SEP_WIDTH;
+        }
+
+        let from = self.lines.len();
+        for (k, (spans, joints)) in render_row(header, self.theme.table_header)
             .into_iter()
             .enumerate()
         {
             let p = if k == 0 { &prefix.first } else { &prefix.rest };
             self.emit(p, spans);
+            span.joints.push(joints);
         }
+        span.rows.push((from, self.lines.len()));
         let rule: Vec<Span<'static>> = widths
             .iter()
             .enumerate()
@@ -474,11 +558,17 @@ impl Renderer<'_> {
             })
             .collect();
         self.emit(&prefix.rest, rule);
+        // 区切り線はどのセルにも属さない
+        span.joints.push(vec![Joint::Hard; ncols]);
         for row in rows {
-            for spans in render_row(row, Style::default()) {
+            let from = self.lines.len();
+            for (spans, joints) in render_row(row, Style::default()) {
                 self.emit(&prefix.rest, spans);
+                span.joints.push(joints);
             }
+            span.rows.push((from, self.lines.len()));
         }
+        self.tables.push(span);
     }
 }
 
