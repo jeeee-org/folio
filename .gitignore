@@ -1,2 +1,5 @@
 /target
 __pycache__/
+
+# そのPCだけのClaude Code向けの指示（閲覧専用のPCで使う）。git管理に入れない
+CLAUDE.local.md
