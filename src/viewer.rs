@@ -396,8 +396,7 @@ impl App {
             (None, main)
         };
         let body = body.inner(Margin::new(self.margin, 0));
-        // 広い端末では本文を最大幅の列に収め、余りは左右に均等に配る（リーダー表示）
-        let body = centered_column(body, self.max_width + HANG_RESERVE);
+        let body = body_column(body, self.max_width);
         self.body = body;
 
         // 行頭禁則でぶら下がる句読点（最大2桁）を切らないよう、折り返し幅は描画領域より2桁狭くする
@@ -693,6 +692,15 @@ impl App {
     }
 }
 
+/// 本文を描く列。`max`（設定の`view.max_width`）が0なら上限なしで領域いっぱいを使い、
+/// 0でなければ広い端末でその幅の列を中央に切り出して、余りを左右に均等に配る（リーダー表示）。
+fn body_column(area: Rect, max: u16) -> Rect {
+    if max == 0 {
+        return area;
+    }
+    centered_column(area, max + HANG_RESERVE)
+}
+
 /// `area`の中に幅`max`までの列を中央に切り出す。狭ければ`area`のまま。
 fn centered_column(area: Rect, max: u16) -> Rect {
     if area.width <= max {
@@ -828,6 +836,17 @@ mod tests {
         type_str(&mut app, "ab");
         app.key(KeyEvent::from(KeyCode::Esc));
         assert!(app.input.is_none() && app.search.is_none() && !app.quit);
+    }
+
+    #[test]
+    fn max_width_zero_uses_the_whole_area() {
+        let area = Rect::new(0, 0, 200, 10);
+        // 0は「上限なし」。プレビュー欄と同じく領域いっぱいを使う
+        assert_eq!(body_column(area, 0), area);
+        // 0でなければ、ぶら下がり分を足した幅で中央に寄せる
+        assert_eq!(body_column(area, 100).width, 102);
+        // 端末が狭ければそのまま
+        assert_eq!(body_column(Rect::new(0, 0, 50, 10), 100).width, 50);
     }
 
     #[test]

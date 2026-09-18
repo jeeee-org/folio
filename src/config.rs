@@ -22,8 +22,8 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct View {
-    /// 本文の折り返しの最大幅（桁）。広い端末では余りを左右に配る。
-    /// 全画面の端末（200桁超）で本文が中央に細く絞られすぎないよう、既定は広めに取る
+    /// 本文の折り返しの最大幅（桁）。`0`なら上限なしで端末の幅いっぱいを使う（既定）。
+    /// 0でなければ、広い端末ではその幅の列を中央に置き、余りを左右に配る
     pub max_width: u16,
     /// 本文の左右の余白（桁）
     pub margin: u16,
@@ -32,7 +32,7 @@ pub struct View {
 impl Default for View {
     fn default() -> Self {
         Self {
-            max_width: 160,
+            max_width: 0,
             margin: 1,
         }
     }
@@ -167,8 +167,8 @@ mod tests {
     #[test]
     fn empty_text_is_default() {
         assert_eq!(Config::parse("").unwrap(), Config::default());
-        // 設定ファイルを置かない端末（配布先）でもこの幅で読める
-        assert_eq!(Config::default().view.max_width, 160);
+        // 設定ファイルを置かない端末（配布先）では上限なし＝端末の幅いっぱい
+        assert_eq!(Config::default().view.max_width, 0);
         assert_eq!(
             Config::default().theme().unwrap().link,
             Theme::default().link

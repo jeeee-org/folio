@@ -11,6 +11,7 @@
 
 ```bash
 cargo install --path .        # ~/.cargo/bin/folio
+cargo install --path . --force   # 入れ直す時。同じ版だと--force無しでは何もせずに終わる
 folio view README.md          # TUIで読む。形式は拡張子で判定（md / csv / tsv / ソースコード / それ以外はテキスト）
 folio view data.txt --format csv              # 判定を上書き（markdown / code / csv / tsv / text）
 folio render --width 80 README.md | less -R   # TUIを開かずANSI出力
@@ -101,7 +102,8 @@ vim風の画面の上に問題（「3単語先の頭へ」「対応する括弧�
 
 ```toml
 [view]
-max_width = 160     # 本文の折り返しの最大幅（桁）。広い端末では余りを左右に配る
+max_width = 0       # 本文の折り返しの最大幅（桁）。0なら上限なしで端末の幅いっぱい（既定）。
+                    # 値を入れると、広い端末ではその幅の列を中央に置き、余りを左右に配る
 margin = 1          # 本文の左右の余白（桁）
 
 [highlight]
