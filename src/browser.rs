@@ -327,7 +327,7 @@ impl<'c> Browser<'c> {
             cwd,
             entries: Vec::new(),
             cursor: 0,
-            show_hidden: false,
+            show_hidden: config.browse.show_hidden,
             preview: None,
             message: None,
             pending_g: false,
@@ -1319,6 +1319,27 @@ mod tests {
         };
         assert_eq!(names(false), vec!["sub", "a2.txt", "a10.txt", "b.txt"]);
         assert_eq!(names(true)[1], ".hidden");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn config_shows_hidden_from_start() {
+        let dir = std::env::temp_dir().join(format!("folio-hidden-start-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".dot")).unwrap();
+        fs::write(dir.join("a.md"), "# a").unwrap();
+        let names = |b: &Browser| b.entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>();
+        let config = Config::default();
+        assert_eq!(
+            names(&Browser::new(dir.clone(), &config).unwrap()),
+            vec!["a.md"]
+        );
+        let mut config = Config::default();
+        config.browse.show_hidden = true;
+        assert_eq!(
+            names(&Browser::new(dir.clone(), &config).unwrap()),
+            vec![".dot", "a.md"]
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 

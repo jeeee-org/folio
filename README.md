@@ -106,6 +106,9 @@ max_width = 0       # 本文の折り返しの最大幅（桁）。0なら上限
                     # 値を入れると、広い端末ではその幅の列を中央に置き、余りを左右に配る
 margin = 1          # 本文の左右の余白（桁）
 
+[browse]
+show_hidden = false # trueなら起動した時から隠しファイル（.始まり）を一覧に出す。起動後は.キーで切り替え
+
 [highlight]
 theme = "base16-ocean.dark"   # コードブロックの配色（syntectのテーマ名）
 

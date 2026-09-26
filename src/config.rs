@@ -15,6 +15,7 @@ use crate::render::Theme;
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub view: View,
+    pub browse: Browse,
     pub highlight: Highlight,
     pub colors: Colors,
 }
@@ -36,6 +37,13 @@ impl Default for View {
             margin: 1,
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Browse {
+    /// 起動した時から隠しファイル（`.`始まり）を一覧に出すか。起動後は`.`で切り替える
+    pub show_hidden: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -183,11 +191,19 @@ mod tests {
         .unwrap();
         assert_eq!(c.view.max_width, 80);
         assert_eq!(c.view.margin, 1);
+        assert!(!c.browse.show_hidden);
         let theme = c.theme().unwrap();
         assert_eq!(theme.link.fg, Some(Color::Rgb(0, 255, 0)));
         // 1色しか無ければ全レベルに繰り返す
         assert_eq!(theme.heading[5].fg, Some(Color::Red));
         assert_eq!(theme.code_block.bg, Some(Color::Indexed(236)));
+    }
+
+    #[test]
+    fn browse_show_hidden() {
+        assert!(!Config::default().browse.show_hidden);
+        let c = Config::parse("[browse]\nshow_hidden = true\n").unwrap();
+        assert!(c.browse.show_hidden);
     }
 
     #[test]
