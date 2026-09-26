@@ -1,7 +1,7 @@
-<!-- claude-rules:embed:begin (版 62ed7df / embed-both / 選択 autocommit,autopush,worktree,toolname。claude-rules/tools/embed-rules.pyが書き込む。中を編集しない — 出典 https://github.com/jeeee-org/claude-rules のrules/common-rules.md) -->
+<!-- claude-rules:embed:begin (版 ccc4ef9 / embed-both / 選択 autocommit,autopush,worktree,toolname。claude-rules/tools/embed-rules.pyが書き込む。中を編集しない — 出典 https://github.com/jeeee-org/claude-rules のrules/common-rules.md) -->
 # 共通ルール（全PJ共通の下地）
 
-全PJ共通の下地としてPJへ書き込んだもの。このブロックの外に書くPJ固有の指示が優先する。
+全PJ共通の下地。このブロックの外に書くPJ固有の指示が優先する。
 `~/.claude/CLAUDE.md`・`~/.codex/AGENTS.md`に以前の共通ルール（`claude-rules:begin` / `codex-rules:begin`のブロック）が残っていたら、二重に読まれるのでユーザーに伝え、了承を得てそのブロックを消す。
 PJに`CLAUDE.md`を作らない（あるとClaude Codeがこのファイルを読まなくなる）。
 
@@ -23,7 +23,7 @@ PJに`CLAUDE.md`を作らない（あるとClaude Codeがこのファイルを�
 
 - checkpointはリポ直下の`checkpoints/YYYY-MM-DD-作業名-中身.md`（どちらも日本語の短い語）。**作業名はカード（§4）の見出しと同じ語にする**——複数日にわたるログを`checkpoints/*-作業名-*`で一括して引くため。**1日1作業1ファイル**、同日に別作業なら分け、同じ日の続きは同ファイルへ追記。
 - `PROGRESS.md`の「完了」は**1行サマリ＋checkpointリンクだけ**。古い分は消してよい。
-- **`PROGRESS.md`に更新履歴を積まない。**「最終更新」は日付だけを書き、「前の更新 = 」を入れ子で重ねない（経緯はcheckpointへ）。**ヘッダが数千バイトに膨れるのはこれが原因。**
+- **`PROGRESS.md`に更新履歴を積まない。**「最終更新」は日付だけを書き、「前の更新 = 」を入れ子で重ねない（経緯はcheckpointへ）。
 - **AGENTS.mdにセッション履歴を追記しない**（毎回全文ロードされる）。
 - 決定（ADR）は独立した節を持たず、決定は日付付き1行で`REQUIREMENTS.md`の方針へ、理由は`NOTES.md`へ。
 - **常時ロードされるファイルの上限**（PJのAGENTS.mdで上書き可）: 共通ルールのブロック **14,336B** / PJ AGENTS.md（ブロックの外） **6,144B** / PROGRESS.md **60行かつ12,288B**。判定はPJルートで`.claude-rules/check-limits.sh`。超過はその場で指摘し、意味を落とさずバイトを削る（畳める記録はcheckpointへ）。
@@ -72,7 +72,7 @@ PJに`CLAUDE.md`を作らない（あるとClaude Codeがこのファイルを�
 リモート・ブランチ戦略・worktree配置先はPJの`AGENTS.md`に従う。**§5.1・§5.2は全PJ必須**。
 
 - **コミットは1作業ごと**（1ドキュメント・1機能・1設定変更など）。まとまりが完了するたび指示を待たずにcommitする。無関係な変更を混ぜない。作業が無ければ不要。
-- **pushは既定で自動**。リモートがあればcommitに続けて**事前承認なし**で`git push`（機微はprivate/publicで管理する前提）。PJの`AGENTS.md`に「pushはユーザー指示時のみ」とあれば従う。push先は§5.1のworktreeブランチ（main/develop直pushは例外宣言のあるPJだけ）。
+- **pushは既定で自動**。リモートがあればcommitに続けて**事前承認なし**で`git push`。PJの`AGENTS.md`に「pushはユーザー指示時のみ」とあれば従う。push先は§5.1のworktreeブランチ（main/develop直pushは例外宣言のあるPJだけ）。
 - **必ず事前確認**：`--force` / `--force-with-lease`のpush、履歴改変（`reset --hard`、`rebase`後のpush）。
 - `GH007`（メール非公開保護）で弾かれたら`git config user.email <username>@users.noreply.github.com`。
 
