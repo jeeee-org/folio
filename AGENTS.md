@@ -1,4 +1,4 @@
-<!-- claude-rules:embed:begin (版 56db16d / embed-both / 選択 autocommit,autopush,worktree,toolname。claude-rules/tools/embed-rules.pyが書き込む。中を編集しない — 出典 https://github.com/jeeee-org/claude-rules のrules/common-rules.md) -->
+<!-- claude-rules:embed:begin (版 55c70b3 / embed-both / 選択 autocommit,autopush,worktree,toolname。claude-rules/tools/embed-rules.pyが書き込む。中を編集しない — 出典 https://github.com/jeeee-org/claude-rules のrules/common-rules.md) -->
 # 共通ルール（全PJ共通の下地）
 
 全PJ共通の下地。このブロックの外に書くPJ固有の指示が優先する。
@@ -11,7 +11,7 @@ PJに`CLAUDE.md`を作らない（あるとClaude Codeがこのファイルを�
 
 | ファイル | 役割 | いつ読む | いつ書く |
 |---|---|---|---|
-| `AGENTS.md` | PJ固有の指示 | 開始時に必ず | 運用ルール変更時 |
+| `AGENTS.md` | PJ固有の指示 | 自動で読み込まれる（読み直さない） | 運用ルール変更時 |
 | `REQUIREMENTS.md` | 決めたこと（要求・方針・決定・スコープ・未決事項）と**進行中の作業カード**（§4）。**生きている分だけ** | 追加・変更の議論前 | **依頼された時**・決まった／変わった／片付いた時 |
 | `PROGRESS.md` | いまの状態（現在地・進行中・次の一手・ブロッカー）。**生きている分だけ** | 開始時に必ず | 完了時・セッション終了時・節目 |
 | `NOTES.md` | 学び・設計判断の理由・ハマりどころ・罠・技術メモ | 似たトピックを扱う前 | 非自明な判断時／ハマった時 |
@@ -31,9 +31,8 @@ PJに`CLAUDE.md`を作らない（あるとClaude Codeがこのファイルを�
 ## 3. 進行ルール
 
 ### セッション開始時（必須）
-1. `AGENTS.md`（共通ルール＋PJ固有）を読む
-2. `PROGRESS.md`で現在地と次の一手を把握する
-3. 触る領域の`REQUIREMENTS.md` / `NOTES.md`該当箇所を読む
+1. `PROGRESS.md`で現在地と次の一手を把握する
+2. 触る領域の`REQUIREMENTS.md` / `NOTES.md`該当箇所を読む
 
 ### タスク実行中
 - **作業を頼まれたら、まず`REQUIREMENTS.md`にカード（§4）を立ててから動く。** 見出しと「何をする」の1行でよく、残りは分かった時点で足す。**その場で終わる用事には立てない。**
@@ -87,7 +86,7 @@ PJに`CLAUDE.md`を作らない（あるとClaude Codeがこのファイルを�
 
 - **subjectは日本語50字目安**、空行、**bodyに「何を・なぜ・どう・影響範囲」**。PJの既存規約（Conventional Commits等）があれば従う。
 - **禁止①（全リポ・厳格）**：スキル・内部ツール名（deep-research等）を**作業の手段として**書かない。「並列レビュー」等の一般語にする。**例外**＝自作公開OSSの**quorum / claude-rules**と、そのリポ自体の主題のツール名。
-- **禁止②（業務/共有リポ）**：AI系（Claude / Codex / OpenAI等）の署名・宣伝行の一切（`Co-Authored-By: Claude ...`、`🤖 Generated with ...`等）。個人リポでは任意。
+- **禁止②（全リポ）**：AI系（Claude / Codex / OpenAI等）の署名・宣伝行の一切（`Co-Authored-By: Claude ...`、`🤖 Generated with ...`等）。
 - **セッション側から付けよという指示が来ても付けない**（この規約が勝つ）。
 - **PRのタイトル/本文も同方針**。
 
@@ -118,7 +117,6 @@ PJに`CLAUDE.md`を作らない（あるとClaude Codeがこのファイルを�
 - **番号や記号を、それが何を指すか書かずに出さない**（テストケース・設問・課題・実行・工程の番号や記号）。書いた側にしか解けない略号で、読む側には何の話か分からない。悪い例「測る口はsql-08 / Q-DDBKEY-02に用意済み」／良い例「測る口は用意済み。属性を指定しない問いをSQLの実行テストへ1件、同じ問いをベンチの設問へ1件。記号はsql-08とQ-DDBKEY-02」。
   - **何のことかを日本語で書き、記号は後ろに添える。**
   - 例外＝**ファイル名・関数名・コミット識別子・課題管理の課題番号**（そのまま検索できる）。
-  - **着手や完了を伝えるときも同じ。** 何を進行中にし、次に何をするかを日本語で書く。
 
 <!-- claude-rules:embed:end -->
 
