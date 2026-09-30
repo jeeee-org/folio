@@ -1,9 +1,9 @@
-<!-- claude-rules:embed:begin (版 55c70b3 / embed-both / 選択 autocommit,autopush,worktree,toolname。claude-rules/tools/embed-rules.pyが書き込む。中を編集しない — 出典 https://github.com/jeeee-org/claude-rules のrules/common-rules.md) -->
+<!-- claude-rules:embed:begin (版 7e1a2d2 / embed-both / 選択 autocommit,autopush,worktree,toolname。claude-rules/tools/embed-rules.pyが書き込む。中を編集しない — 出典 https://github.com/jeeee-org/claude-rules のrules/common-rules.md) -->
 # 共通ルール（全PJ共通の下地）
 
 全PJ共通の下地。このブロックの外に書くPJ固有の指示が優先する。
 `~/.claude/CLAUDE.md`・`~/.codex/AGENTS.md`に以前の共通ルール（`claude-rules:begin` / `codex-rules:begin`のブロック）が残っていたら、二重に読まれるのでユーザーに伝え、了承を得てそのブロックを消す。
-PJに`CLAUDE.md`を作らない（あるとClaude Codeがこのファイルを読まなくなる）。
+PJにも、その上位のディレクトリにも`CLAUDE.md`を作らない（あるとClaude Codeがこのファイルを読まなくなる）。
 
 ## 1. 進行管理：4軸 + checkpoint（共通骨格）
 

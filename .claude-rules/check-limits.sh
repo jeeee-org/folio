@@ -40,8 +40,28 @@ chk() { # ラベル ファイル 上限 単位
   fi
 }
 
+# rules/ の下の .md のうち、先頭の frontmatter に paths: が無いもの（常時ロードされる分）を
+# 合計して測る。paths: があるものは該当ファイルを触った時だけ読まれるので数だけ出す。
+# 2026-09-26 に共通ルールをグローバルから外したので、グローバルで常時載るのは主にこちら。
+chk_rules() { # ラベル ディレクトリ 上限
+  local label="$1" dir="$2" lim="$3" tmp f n=0 cond=0
+  [ -d "$dir" ] || return 0
+  tmp="$(mktemp)"
+  while IFS= read -r -d '' f; do
+    if awk 'NR==1&&$0!="---"{exit 1} NR>1&&$0=="---"{exit 1} NR>1&&/^paths:/{found=1; exit 0} END{exit !found}' "$f"; then
+      cond=$((cond+1))
+    else
+      cat "$f" >> "$tmp"; n=$((n+1))
+    fi
+  done < <(find "$dir" -name '*.md' -print0 2>/dev/null)
+  if [ "$n" -gt 0 ]; then chk "$label（常時・${n}件）" "$tmp" "$lim" B; fi
+  [ "$cond" -gt 0 ] && printf '  %-26s paths指定あり %d件（触った時だけ読まれる。合計に入れない）\n' "$label" "$cond"
+  rm -f "$tmp"
+}
+
 echo "— グローバル（全セッションでロード）"
 chk "${CC/#$HOME/\~}/CLAUDE.md" "$CC/CLAUDE.md" "$G" B
+chk_rules "${CC/#$HOME/\~}/rules/*.md" "$CC/rules" "$G"
 chk "${CX/#$HOME/\~}/AGENTS.md" "$CX/AGENTS.md" "$G" B
 
 # 共通ルールをPJへ書き込んだ形（tools/embed-rules.py）では、マーカー間はグローバルの上限で、
@@ -66,6 +86,7 @@ chk_pj() { # ラベル ファイル
 echo "— PJ: ${PJ/#$HOME/\~}"
 chk_pj "CLAUDE.md" "$PJ/CLAUDE.md"
 chk_pj "AGENTS.md" "$PJ/AGENTS.md"
+chk_rules ".claude/rules/*.md" "$PJ/.claude/rules" "$P"
 chk "PROGRESS.md" "$PJ/PROGRESS.md" "$PB" B
 chk "PROGRESS.md (行数)" "$PJ/PROGRESS.md" "$PL" 行
 
