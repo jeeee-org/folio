@@ -2,7 +2,7 @@
 
 ターミナルの中で文書を読み、そのまま編集に入るための道具。Rust製。
 
-マークダウンを整形して表示するビューアー`folio view <path>`をyaziから開いて使う。プレーンテキスト・ソースコード（ハイライト付き）・CSV/TSV（表）も読める。段階的に、読みやすさの作り込み・対応形式の追加・vimコマンドの練習モードを足していく。最終的にはファイラーも自作してfolio単体で完結させる予定で、それまでyaziは足場として使う。
+ファイラー`folio browse`で辿り、マークダウンをVSCodeのプレビューに近い見やすさで読み、`e`でvimに入る。プレーンテキスト・ソースコード（ハイライト付き）・CSV/TSV（表）も読める。マウス操作・vimの移動の練習モードもある。日常の入口はyaziからfolioへ移した（yaziから`folio view`を呼ぶ使い方もそのまま残る）。
 
 - 何を作るか: [REQUIREMENTS.md](REQUIREMENTS.md)
 - 今どこにいるか: [PROGRESS.md](PROGRESS.md)
@@ -16,6 +16,8 @@ folio view README.md          # TUIで読む。形式は拡張子で判定（md 
 folio view data.txt --format csv              # 判定を上書き（markdown / code / csv / tsv / text）
 folio render --width 80 README.md | less -R   # TUIを開かずANSI出力
 ```
+
+Rustの無いマシンで使う時は、手元でビルドした`~/.cargo/bin/folio`をそのまま相手の`~/.local/bin/`などへコピーすればよい（x86_64のLinuxで、相手のglibcが手元と同じか新しい場合。依存は`libc`・`libm`・`libgcc_s`だけ）。`fb`（下の「yaziから置き換える」）を使うなら、相手の`.bashrc`にも足す。
 
 キーは3層。移動と検索はvim準拠、ページャ的な操作はlessと互換、アプリ操作はvimの移動キーを避ける。
 
@@ -70,7 +72,7 @@ folio browse ~/notes    # 開始ディレクトリを指定
 
 **表の中はセル単位で選ぶ。** セルの中でドラッグを始めると、範囲はそのセルの矩形から外に出ない（下や右へ大きく引いてもよい）。他の列は巻き添えにならず、セルの中で折り返された行はつながって1行でコピーされる。罫線`│`の上で始めた時だけ、これまでどおり行をまたぐ選択になる。
 
-クリップボードへは端末の機能（OSC 52）で送るので、Windows Terminalならそのまま使える。tmuxの中では`set -g set-clipboard on`が要る。folioがマウスを受け取っている間、端末そのものの文字選択は**`Shift`を押しながらドラッグ**（`Alt`も足すと矩形）で使える。
+クリップボードへは端末の機能（OSC 52）で送るので、Windows Terminalならそのまま使える。tmuxの中では`set -g set-clipboard on`が要る。**GNU screen（4.09）の中では、コピーが手元の端末へ届かず、コードブロックの24ビット色も崩れる**（対応はバックログ）。screenを使う環境でも、folioはscreenの外で開く。folioがマウスを受け取っている間、端末そのものの文字選択は**`Shift`を押しながらドラッグ**（`Alt`も足すと矩形）で使える。
 
 ### yaziから置き換える
 
