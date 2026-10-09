@@ -1,4 +1,4 @@
-<!-- claude-rules:embed:begin (版 7e1a2d2 / embed-both / 選択 autocommit,autopush,worktree,toolname。claude-rules/tools/embed-rules.pyが書き込む。中を編集しない — 出典 https://github.com/jeeee-org/claude-rules のrules/common-rules.md) -->
+<!-- claude-rules:embed:begin (版 b7522fb / embed-both / 選択 autocommit,autopush,worktree,toolname。claude-rules/tools/embed-rules.pyが書き込む。中を編集しない — 出典 https://github.com/jeeee-org/claude-rules のrules/common-rules.md) -->
 # 共通ルール（全PJ共通の下地）
 
 全PJ共通の下地。このブロックの外に書くPJ固有の指示が優先する。
@@ -39,7 +39,7 @@ PJにも、その上位のディレクトリにも`CLAUDE.md`を作らない（�
 - **要件・スコープの判断**は勝手にせず、`REQUIREMENTS.md`の未決事項に書くかユーザーに確認する。決まった／変わったら即反映。
 - **記録の未決・積み残しを利用者へ出す前に**、書いた日より後のcheckpointで片付いていないか確かめる。
 - **非自明な技術/方針判断**（選定理由・解釈）はその場で`NOTES.md`へ。
-- **スキルでハマり・ズレがあったら、その場でSKILL.mdの修正をdiff提案する**。スキルの新規作成・変更は勝手に行わない。
+- **スキルでハマり・ズレがあったら、その場でSKILL.mdの修正をdiff提案する**。スキルの新規作成・変更は勝手に行わない。提案の前に、そのスキルの過去のハマりと却下を`NOTES.md`・checkpointで引く。**1回に1か所**、防げるはずの実例を1件添える。退けられたら理由を`NOTES.md`へ1行（同じ提案を繰り返さない）。
 - **PJが「必須」と定めた関門のサブエージェント（レビュー役・検査役）は許可を取らず呼ぶ**。呼ぶ前に何を通すか1行宣言。諮るのは関門でない呼び出し（探索の並列化・調べ物の委譲）だけ。
 
 ### タスク完了時（必須）
