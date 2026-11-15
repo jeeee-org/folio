@@ -22,7 +22,7 @@ P8（ファイラーのマウス操作）を2026-09-15に完了。2026-09-18に�
 
 ## 完了
 
-- [x] 2026-11-15 消えていた`folio`本体と設定ファイルを入れ直した。yaziは削除（`fb`だけで足りるため） → [checkpoint](checkpoints/2026-11-15-yaziの削除-入れ直し.md)
+- [x] 2026-11-15 消えていた`folio`本体と設定ファイルを入れ直した。yaziを削除し（`fb`だけで足りるため）、READMEからもyaziの記述をすべて消した → [checkpoint](checkpoints/2026-11-15-yaziの削除-入れ直し.md)
 - [x] 2026-11-04 画像・PowerPoint・PDF・Excel・CSVの表示ができるかを見立て、バックログと未決事項に積んだ → [checkpoint](checkpoints/2026-11-04-対応形式の見立て.md)
 - [x] 2026-11-04 claude-rulesに沿っているかを点検し、古くなった決定・日付・書式を直した（共通ルールは最新版のまま） → [checkpoint](checkpoints/2026-11-04-共通ルールへの追従-記録の手入れ.md)
 - [x] 2026-10-20 ` ```markdown `で囲った中身をキーで整形表示する案をバックログに積んだ → [checkpoint](checkpoints/2026-10-20-バックログ追加-markdownコードブロック.md)
