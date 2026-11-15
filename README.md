@@ -2,7 +2,7 @@
 
 ターミナルの中で文書を読み、そのまま編集に入るための道具。Rust製。
 
-ファイラー`folio browse`で辿り、マークダウンをVSCodeのプレビューに近い見やすさで読み、`e`でvimに入る。プレーンテキスト・ソースコード（ハイライト付き）・CSV/TSV（表）も読める。マウス操作・vimの移動の練習モードもある。日常の入口はyaziからfolioへ移した（yaziから`folio view`を呼ぶ使い方もそのまま残る）。
+ファイラー`folio browse`で辿り、マークダウンをVSCodeのプレビューに近い見やすさで読み、`e`でvimに入る。プレーンテキスト・ソースコード（ハイライト付き）・CSV/TSV（表）も読める。マウス操作・vimの移動の練習モードもある。日常の入口はyaziからfolioへ移した。
 
 - 何を作るか: [REQUIREMENTS.md](REQUIREMENTS.md)
 - 今どこにいるか: [PROGRESS.md](PROGRESS.md)
@@ -17,7 +17,7 @@ folio view data.txt --format csv              # 判定を上書き（markdown / 
 folio render --width 80 README.md | less -R   # TUIを開かずANSI出力
 ```
 
-Rustの無いマシンで使う時は、手元でビルドした`~/.cargo/bin/folio`をそのまま相手の`~/.local/bin/`などへコピーすればよい（x86_64のLinuxで、相手のglibcが手元と同じか新しい場合。依存は`libc`・`libm`・`libgcc_s`だけ）。`fb`（下の「yaziから置き換える」）を使うなら、相手の`.bashrc`にも足す。
+Rustの無いマシンで使う時は、手元でビルドした`~/.cargo/bin/folio`をそのまま相手の`~/.local/bin/`などへコピーすればよい（x86_64のLinuxで、相手のglibcが手元と同じか新しい場合。依存は`libc`・`libm`・`libgcc_s`だけ）。`fb`（下の「シェルから開く」）を使うなら、相手の`.bashrc`にも足す。
 
 キーは3層。移動と検索はvim準拠、ページャ的な操作はlessと互換、アプリ操作はvimの移動キーを避ける。
 
@@ -82,15 +82,13 @@ set -g set-clipboard on
 
 **GNU screen（4.09）の中では、コピーが手元の端末へ届かず、コードブロックの24ビット色も崩れる**（対応はバックログ）。screenの代わりに上の設定のtmuxを使うか、folioはscreenの外で開く。folioがマウスを受け取っている間、端末そのものの文字選択は**`Shift`を押しながらドラッグ**（`Alt`も足すと矩形）で使える。
 
-### yaziから置き換える
+### シェルから開く
 
-日常の入口を`folio browse`にするには、シェルに関数を1つ置く（終了したディレクトリに移動する。yaziと同じ`--cwd-file`方式）。`.zshrc`や`.bashrc`に:
+日常の入口を`folio browse`にするには、シェルに関数を1つ置く（終了したディレクトリに移動する`--cwd-file`方式）。`.zshrc`や`.bashrc`に:
 
 ```bash
 fb() { local tmp; tmp=$(mktemp); folio browse --cwd-file "$tmp" "$@"; local d; d=$(cat "$tmp"); rm -f "$tmp"; [ -n "$d" ] && cd "$d"; }
 ```
-
-yaziの設定（`yazi.toml`のopenerとpreviewer）は消さなくてよい。yaziを開けばこれまでどおりfolioで読めるので、戻りたい時にそのまま戻れる。
 
 ## vimの移動を練習する
 
@@ -134,27 +132,6 @@ bullet = "cyan"
 rule = "darkgray"
 table_border = "darkgray"
 url = "darkgray"        # Uキーで表示するURL
-```
-
-## yaziとの連携
-
-`~/.config/yazi/yazi.toml`に足す。プレビュー欄は[piper.yazi](https://github.com/yazi-rs/plugins/tree/main/piper.yazi)経由。
-
-```toml
-[[plugin.prepend_previewers]]
-url = "*.md"
-run = 'piper -- folio render --width "$w" "$1"'
-
-[opener]
-folio = [
-  { run = 'folio view "$1"', block = true, desc = "folioで読む" },
-]
-
-[open]
-prepend_rules = [
-  { url = "*.md", use = ["folio", "edit"] },
-  { url = "*.{csv,tsv}", use = ["folio", "edit"] },
-]
 ```
 
 ## 状態
