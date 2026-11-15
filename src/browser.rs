@@ -517,8 +517,8 @@ impl<'c> Browser<'c> {
             return Ok(());
         };
         if let Some((label, value)) = menu.items.get(row) {
-            viewer::copy_to_clipboard(value)?;
-            self.message = Some(format!("{label}をコピーしました: {value}"));
+            let hint = viewer::copy_to_clipboard(value)?;
+            self.message = Some(format!("{label}をコピーしました: {value}{hint}"));
         }
         Ok(())
     }

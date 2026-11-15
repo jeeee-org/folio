@@ -38,6 +38,7 @@
 - 2026-09-12 折り返し幅と描画領域を同じにすると、行頭禁則でぶら下げた句読点が領域の外に出て切れる。ビューアー側で描画領域より2桁狭く折り返す（`HANG_RESERVE`）。
 - 2026-09-12 折り返し幅が変わる（目次ペインの開閉・端末のリサイズ）と行番号がずれ、画面上端の内容が変わる。スクロール位置は行番号でなく「直前の見出し＋そこからの行数」で持ち直す（`ensure_rendered`）。描画側が見出しの行位置を返す設計にした理由の1つ。
 - 2026-09-12 タイトなリスト（項目間に空行なし）では、pulldown-cmarkはItemの直下にParagraphを出さずTextを直接出す。解析側で暗黙の段落を開いて吸収している。
+- 2026-11-15 Ptyxis（VTE 0.84）はOSC 52を黙って捨てる（VTE系は未対応）。OSC 52は常に送ったまま、`WAYLAND_DISPLAY`があれば`wl-copy`、`DISPLAY`があれば`xclip`→`xsel`にも標準入力で渡す（`src/clipboard.rs`）。クレート（arboard等）にしなかったのは、Waylandでは書いたプロセスが中身を持ち続ける必要があり、folioが終わると消えるため。`wl-copy`は裏に残って持ち続ける。VTE系かは`VTE_VERSION`で分かるので、道具が無い時だけ入れ方をメッセージに添える。
 - 2026-10-02 tmuxは設定なしだと24ビット色を256色に落とし（`38;2;…`→`38;5;…`）、OSC 52も外へ出さない（`set-clipboard`の既定が`external`）。`default-terminal "tmux-256color"`・`terminal-features ",xterm*:RGB"`・`set-clipboard on`の3行で両方届く（READMEに記載）。folioのOSC 52は素の形なので`allow-passthrough`は要らない。screen 4.09は24ビット色もOSC 52も素通ししない（対応はバックログ）。
 
 ## yaziとの連携

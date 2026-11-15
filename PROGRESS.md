@@ -22,6 +22,7 @@ P8（ファイラーのマウス操作）を2026-09-15に完了。2026-09-18に�
 
 ## 完了
 
+- [x] 2026-11-15 Ptyxis（OSC 52を受け取らない端末）でもコピーが届くよう、`wl-copy`・`xclip`・`xsel`にも渡すようにした（版0.3.1、このPCは`wl-clipboard`を入れて確認済み） → [checkpoint](checkpoints/2026-11-15-Ptyxisでのコピー-デスクトップの道具.md)
 - [x] 2026-11-15 消えていた`folio`本体と設定ファイルを入れ直した。yaziを削除し（`fb`だけで足りるため）、READMEからもyaziの記述をすべて消した → [checkpoint](checkpoints/2026-11-15-yaziの削除-入れ直し.md)
 - [x] 2026-11-04 画像・PowerPoint・PDF・Excel・CSVの表示ができるかを見立て、バックログと未決事項に積んだ → [checkpoint](checkpoints/2026-11-04-対応形式の見立て.md)
 - [x] 2026-11-04 claude-rulesに沿っているかを点検し、古くなった決定・日付・書式を直した（共通ルールは最新版のまま） → [checkpoint](checkpoints/2026-11-04-共通ルールへの追従-記録の手入れ.md)

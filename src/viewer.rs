@@ -19,6 +19,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 use unicode_width::UnicodeWidthStr;
 
+use crate::clipboard;
 use crate::config::Config;
 use crate::document;
 use crate::format::Format;
@@ -156,8 +157,11 @@ pub fn selection_key(
     match key.code {
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             let text = text(sel);
-            copy_to_clipboard(&text)?;
-            *message = Some(format!("コピーしました（{}文字）", text.chars().count()));
+            let hint = copy_to_clipboard(&text)?;
+            *message = Some(format!(
+                "コピーしました（{}文字）{hint}",
+                text.chars().count()
+            ));
             Ok(true)
         }
         KeyCode::Esc => {
@@ -168,13 +172,10 @@ pub fn selection_key(
     }
 }
 
-/// 端末経由でクリップボードへ送る（OSC 52）。
-pub fn copy_to_clipboard(text: &str) -> Result<()> {
-    use std::io::Write;
-    let mut out = std::io::stdout();
-    out.write_all(select::osc52(text).as_bytes())?;
-    out.flush()?;
-    Ok(())
+/// クリップボードへ送り、メッセージに添える注意を返す（届かないおそれがある時だけ）。
+pub fn copy_to_clipboard(text: &str) -> Result<&'static str> {
+    let delivery = clipboard::copy(text)?;
+    Ok(clipboard::hint(&delivery, clipboard::is_vte()))
 }
 
 /// ファイルをUTF-8として読む。文字コードの自動判定はしない。

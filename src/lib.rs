@@ -6,6 +6,7 @@
 
 pub mod ansi;
 pub mod browser;
+pub mod clipboard;
 pub mod config;
 pub mod document;
 pub mod drill;
