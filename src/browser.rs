@@ -12,7 +12,7 @@ use ratatui::crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
 };
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect, Size};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
@@ -22,6 +22,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::config::Config;
 use crate::fileops;
 use crate::format::Format;
+use crate::graphics::Visual;
 use crate::highlight::Highlighter;
 use crate::render::{self, Flow, Options, Rendered, TableSpan, Theme};
 use crate::search;
@@ -30,7 +31,7 @@ use crate::viewer;
 
 /// プレビューで読む上限（バイト）。これより大きいファイルは読まない。
 pub const PREVIEW_MAX_BYTES: u64 = 1024 * 1024;
-/// PDFは文字を抜き出す時間で決まり、数MBでも0.3秒ほどで済むので上限を別に持つ。
+/// PDFと画像は読む時間で決まり、数MBでも0.3秒ほどで済むので上限を別に持つ。
 pub const PDF_PREVIEW_MAX_BYTES: u64 = 50 * 1024 * 1024;
 
 /// 同じ項目への2回のクリックをダブルクリックとみなす間隔。
@@ -181,6 +182,7 @@ pub fn run(start: &Path, config: &Config) -> Result<PathBuf> {
     let start =
         fs::canonicalize(start).with_context(|| format!("{}が見つかりません", start.display()))?;
     let mut terminal = ratatui::init();
+    crate::graphics::init();
     let result = viewer::set_mouse_capture(true)
         .and_then(|()| Browser::new(start, config))
         .and_then(|mut b| b.run(&mut terminal));
@@ -254,6 +256,24 @@ fn is_double_click(prev: Option<(Instant, usize)>, now: Instant, index: usize) -
     prev.is_some_and(|(at, i)| i == index && now.saturating_duration_since(at) <= DOUBLE_CLICK)
 }
 
+/// 見た目で出すプレビュー（画像ファイルと、描ける端末でのPDF）。
+struct VisualPreview {
+    path: PathBuf,
+    /// 開けなければその理由
+    visual: Result<Visual, String>,
+}
+
+/// 見た目でプレビューするか。画像ファイルはいつも（描けない端末ではブロック文字で近似）、
+/// PDFは画素で描ける端末でだけ（ブロック文字では読めないので文字にする）。大きすぎるものは出さない。
+fn wants_visual(path: &Path) -> bool {
+    let visual = match crate::format::resolve(path, None) {
+        Format::Image => true,
+        Format::Pdf => crate::graphics::can_draw(),
+        _ => false,
+    };
+    visual && fs::metadata(path).is_ok_and(|m| m.len() <= PDF_PREVIEW_MAX_BYTES)
+}
+
 /// 右ペインの状態。カーソルの項目が変わった時だけ作り直す。
 struct Preview {
     path: PathBuf,
@@ -276,6 +296,7 @@ struct Browser<'c> {
     cursor: usize,
     show_hidden: bool,
     preview: Option<Preview>,
+    visual_preview: Option<VisualPreview>,
     message: Option<String>,
     pending_g: bool,
     list_height: usize,
@@ -344,6 +365,7 @@ impl<'c> Browser<'c> {
             cursor: 0,
             show_hidden: config.browse.show_hidden,
             preview: None,
+            visual_preview: None,
             message: None,
             pending_g: false,
             list_height: 1,
@@ -876,8 +898,8 @@ impl<'c> Browser<'c> {
         if entry.is_dir {
             return Ok(());
         }
-        if crate::format::is_pdf(&entry.path, None) {
-            self.message = Some(viewer::PDF_NOT_EDITABLE.to_string());
+        if crate::format::resolve(&entry.path, None).is_visual() {
+            self.message = Some(viewer::NOT_EDITABLE.to_string());
             return Ok(());
         }
         match viewer::open_editor(terminal, &entry.path)? {
@@ -959,6 +981,15 @@ impl<'c> Browser<'c> {
             ..area
         };
         self.preview_inner = inner;
+        if let Some(entry) = self.current().cloned()
+            && !entry.is_dir
+            && wants_visual(&entry.path)
+        {
+            self.preview = None;
+            self.draw_visual_preview(frame, inner, &entry.path);
+            return;
+        }
+        self.visual_preview = None;
         self.ensure_preview(inner.width);
         let selection = self.drag.selection();
         let Some(p) = &mut self.preview else {
@@ -982,6 +1013,42 @@ impl<'c> Browser<'c> {
             .collect();
         let text = Text::from(lines);
         frame.render_widget(Paragraph::new(text), inner);
+    }
+
+    /// 画像・PDFの見た目のプレビュー。下の1行に大きさかページ数を添える。
+    fn draw_visual_preview(&mut self, frame: &mut Frame, area: Rect, path: &Path) {
+        if self.visual_preview.as_ref().is_none_or(|v| v.path != path) {
+            let format = crate::format::resolve(path, None);
+            self.visual_preview = Some(VisualPreview {
+                path: path.to_path_buf(),
+                visual: Visual::open(path, format).map_err(|e| format!("{e:#}")),
+            });
+        }
+        let Some(vp) = &mut self.visual_preview else {
+            return;
+        };
+        let [body, caption] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
+        let visual = match &mut vp.visual {
+            Ok(v) => v,
+            Err(e) => {
+                let line = Line::from(format!("プレビューなし（{e}）")).dim();
+                frame.render_widget(Paragraph::new(line), area);
+                return;
+            }
+        };
+        match visual.page(0, Size::new(body.width, body.height)) {
+            Ok(protocol) => {
+                let at = crate::graphics::centered(protocol, body);
+                frame.render_widget(ratatui_image::Image::new(protocol), at);
+            }
+            Err(e) => frame.render_widget(Paragraph::new(format!("{e:#}")).red(), body),
+        }
+        let text = match visual.dimensions() {
+            Some((w, h)) => format!("{w}×{h}"),
+            None => format!("1 / {}ページ（Enterで全ページ）", visual.page_count()),
+        };
+        frame.render_widget(Paragraph::new(Line::from(text).dim()), caption);
     }
 
     /// カーソルの項目か幅が変わっていたらプレビューを作り直す。

@@ -114,7 +114,7 @@ fn needs_space(prev: &str, next: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn texts(block: &Block) -> String {
@@ -219,7 +219,7 @@ mod tests {
     }
 
     /// 1ページに英字1行だけのPDFを組み立てる（xrefの位置を数えて書く）。
-    fn minimal_pdf(text: &str) -> Vec<u8> {
+    pub(crate) fn minimal_pdf(text: &str) -> Vec<u8> {
         let stream = format!("BT /F1 24 Tf 72 720 Td ({text}) Tj ET");
         let objects = [
             "<< /Type /Catalog /Pages 2 0 R >>".to_string(),

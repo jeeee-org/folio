@@ -1,4 +1,4 @@
-//! ファイルの形式（マークダウン・ソースコード・CSV/TSV・プレーンテキスト・PDF）の判定と、
+//! ファイルの形式（マークダウン・ソースコード・CSV/TSV・プレーンテキスト・PDF・画像）の判定と、
 //! 各形式をブロック構造へ変換する入口。中核の一部で、ターミナルには触らない。
 
 use std::fmt;
@@ -19,6 +19,8 @@ pub enum Format {
     Text,
     /// 文字だけを抜き出して読む（中身は`pdftotext`の出力）
     Pdf,
+    /// 画像ファイル（見た目でだけ出す）
+    Image,
 }
 
 impl Format {
@@ -30,6 +32,7 @@ impl Format {
             "csv" => Format::Csv,
             "tsv" => Format::Tsv,
             "pdf" => Format::Pdf,
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => Format::Image,
             "txt" | "text" | "" => Format::Text,
             e if knows_ext(e) => Format::Code,
             _ => Format::Text,
@@ -48,6 +51,9 @@ impl Format {
             Format::Tsv => parse_delimited(source, b'\t'),
             Format::Text => parse_text(source),
             Format::Pdf => pdf::parse(source),
+            Format::Image => vec![Block::Paragraph(vec![Inline::plain(
+                "（画像ファイル。folio viewかファイラーで見た目を出せます）",
+            )])],
         }
     }
 }
@@ -63,8 +69,9 @@ impl FromStr for Format {
             "tsv" => Ok(Format::Tsv),
             "text" | "txt" => Ok(Format::Text),
             "pdf" => Ok(Format::Pdf),
+            "image" => Ok(Format::Image),
             other => Err(format!(
-                "{other}は形式として解釈できません（markdown / code / csv / tsv / text / pdf）"
+                "{other}は形式として解釈できません（markdown / code / csv / tsv / text / pdf / image）"
             )),
         }
     }
@@ -79,6 +86,7 @@ impl fmt::Display for Format {
             Format::Tsv => "tsv",
             Format::Text => "text",
             Format::Pdf => "pdf",
+            Format::Image => "image",
         };
         f.write_str(name)
     }
@@ -87,8 +95,10 @@ impl fmt::Display for Format {
 /// 形式に応じてファイルの中身を文字列で読む。PDFは文字を抜き出し、他はUTF-8として読む
 /// （文字コードの自動判定はしない）。`format`が無ければ拡張子で決める。
 pub fn read_source(path: &Path, format: Option<Format>) -> Result<String> {
-    if is_pdf(path, format) {
-        return pdf::extract(path);
+    match resolve(path, format) {
+        Format::Pdf => return pdf::extract(path),
+        Format::Image => return Ok(String::new()), // 文字としては読まない
+        _ => {}
     }
     let bytes = std::fs::read(path).with_context(|| format!("{}を読めません", path.display()))?;
     String::from_utf8(bytes).with_context(|| {
@@ -101,7 +111,20 @@ pub fn read_source(path: &Path, format: Option<Format>) -> Result<String> {
 
 /// PDFとして読むか。形式の指定が無ければ拡張子で決める。
 pub fn is_pdf(path: &Path, format: Option<Format>) -> bool {
-    format.unwrap_or_else(|| Format::detect(path, |_| false)) == Format::Pdf
+    resolve(path, format) == Format::Pdf
+}
+
+/// 指定が無ければ拡張子で決めた形式。ソースコードかテキストかは区別しない
+/// （PDF・画像かどうかを知りたい時に、ハイライターを用意せずに使う）。
+pub fn resolve(path: &Path, format: Option<Format>) -> Format {
+    format.unwrap_or_else(|| Format::detect(path, |_| false))
+}
+
+impl Format {
+    /// 見た目（画像）で出せる形式か。
+    pub fn is_visual(self) -> bool {
+        matches!(self, Format::Pdf | Format::Image)
+    }
 }
 
 fn extension(path: &Path) -> String {
@@ -192,6 +215,8 @@ mod tests {
         assert_eq!(d("LICENSE"), Format::Text);
         assert_eq!(d("a.txt"), Format::Text);
         assert_eq!(d("a.PDF"), Format::Pdf);
+        assert_eq!(d("a.JPG"), Format::Image);
+        assert_eq!(d("a.webp"), Format::Image);
     }
 
     #[test]

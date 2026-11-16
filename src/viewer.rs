@@ -22,7 +22,9 @@ use crate::clipboard;
 use crate::config::Config;
 use crate::document;
 use crate::format::{self, Format};
+use crate::graphics::{self, Visual};
 use crate::highlight::Highlighter;
+use crate::pageview;
 use crate::render::{self, Options, Rendered, Theme};
 use crate::search::{self, Match};
 use crate::select::{self, Dragger, Selection};
@@ -36,8 +38,8 @@ const TOC_MIN_WIDTH: u16 = 24;
 /// ホイール1回で動かす行数（項目数）。
 pub const WHEEL_STEP: isize = 5;
 
-/// PDFで`e`を押した時の知らせ。
-pub const PDF_NOT_EDITABLE: &str = "PDFは編集できません（ファイラーのoで外部アプリに開けます）";
+/// PDF・画像で`e`を押した時の知らせ。
+pub const NOT_EDITABLE: &str = "PDF・画像は編集できません（ファイラーのoで外部アプリに開けます）";
 
 /// 端末にマウスを受け取らせているか。エディタに渡す間だけ止めて戻すために覚えておく。
 static MOUSE_CAPTURE: AtomicBool = AtomicBool::new(false);
@@ -89,6 +91,7 @@ pub fn render_to_stdout(
 /// `folio view <path>`の本体。ファイルを読み、閉じるまでターミナルを占有する。
 pub fn run(path: &Path, config: &Config, format: Option<Format>) -> Result<()> {
     let mut terminal = ratatui::init();
+    graphics::init();
     let result =
         set_mouse_capture(true).and_then(|()| view_in(&mut terminal, path, config, format));
     let _ = set_mouse_capture(false);
@@ -104,11 +107,84 @@ pub fn view_in(
     config: &Config,
     format: Option<Format>,
 ) -> Result<()> {
-    let source = format::read_source(path, format)?;
-    let mut app = App::new(path, &source, config, format)?;
-    let result = app.run(terminal);
+    let result = match format::resolve(path, format) {
+        Format::Image => view_image(terminal, path),
+        Format::Pdf => view_pdf(terminal, path, config),
+        _ => {
+            let source = format::read_source(path, format)?;
+            let mut app = App::new(path, &source, config, format)?;
+            app.run(terminal)
+        }
+    };
     terminal.clear()?;
     result
+}
+
+/// 画像ファイルを見た目で出す。
+fn view_image(terminal: &mut DefaultTerminal, path: &Path) -> Result<()> {
+    let mut visual = Visual::open(path, Format::Image)?;
+    pageview::run(terminal, &mut visual, &display_name(path), &mut 0)?;
+    Ok(())
+}
+
+/// PDFを、描ける端末では見た目で、描けなければ文字で出す。`i`で行き来し、ページは引き継ぐ。
+fn view_pdf(terminal: &mut DefaultTerminal, path: &Path, config: &Config) -> Result<()> {
+    let mut visual = None;
+    let mut text: Option<App> = None;
+    let mut page = 0;
+    let mut image_mode = graphics::can_draw();
+    loop {
+        if image_mode {
+            if visual.is_none() {
+                match Visual::open(path, Format::Pdf) {
+                    Ok(v) => visual = Some(v),
+                    Err(err) => {
+                        // 見た目を出せなければ文字の表示へ（理由はステータス行に）
+                        image_mode = false;
+                        let app = text_app(&mut text, path, config)?;
+                        app.message = Some(format!("見た目を出せません: {err:#}"));
+                        continue;
+                    }
+                }
+            }
+            let v = visual.as_mut().expect("直前に開いた");
+            match pageview::run(terminal, v, &display_name(path), &mut page)? {
+                pageview::Exit::Quit => return Ok(()),
+                pageview::Exit::ToText => {
+                    image_mode = false;
+                    text_app(&mut text, path, config)?.jump_page = Some(page);
+                }
+            }
+        } else {
+            let app = text_app(&mut text, path, config)?;
+            app.quit = false;
+            app.run(terminal)?;
+            if !app.to_image {
+                return Ok(());
+            }
+            app.to_image = false;
+            // 文字の表示で上端にあるページ（見出しはページごとに1つ）から見た目へ
+            page = app.current_heading().unwrap_or(0);
+            image_mode = true;
+        }
+        terminal.clear()?;
+    }
+}
+
+/// PDFの文字の表示を、初めて要る時に作る。
+fn text_app<'a>(text: &'a mut Option<App>, path: &Path, config: &Config) -> Result<&'a mut App> {
+    if text.is_none() {
+        let source = format::read_source(path, Some(Format::Pdf))?;
+        *text = Some(App::new(path, &source, config, Some(Format::Pdf))?);
+    }
+    Ok(text.as_mut().expect("直前に作った"))
+}
+
+/// 見た目の表示のステータス行に出す名前（ページ数などの場所を残すため、ファイル名だけ）。
+fn display_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// TUIを抜けて`$VISUAL`/`$EDITOR`（既定はvim）で`path`を開き、閉じたらTUIに戻る。
@@ -221,6 +297,10 @@ struct App {
     body: Rect,
     /// ドラッグでの文字の選択
     drag: Dragger,
+    /// `i`で見た目の表示へ切り替えるために閉じたか（PDFだけ）
+    to_image: bool,
+    /// 次に描く時に上端へ持ってくるページ（0始まり。見た目の表示から戻った時）
+    jump_page: Option<usize>,
 }
 
 struct Search {
@@ -257,6 +337,8 @@ impl App {
             search: None,
             body: Rect::default(),
             drag: Dragger::default(),
+            to_image: false,
+            jump_page: None,
         })
     }
 
@@ -273,8 +355,8 @@ impl App {
 
     /// TUIを抜けて`$EDITOR`（既定はvim）で開き、閉じたらTUIに戻って読み直す。
     fn edit(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
-        if self.format == Format::Pdf {
-            self.message = Some(PDF_NOT_EDITABLE.to_string());
+        if self.format.is_visual() {
+            self.message = Some(NOT_EDITABLE.to_string());
             return Ok(());
         }
         match open_editor(terminal, &self.path)? {
@@ -397,6 +479,12 @@ impl App {
 
         // 行頭禁則でぶら下がる句読点（最大2桁）を切らないよう、折り返し幅は描画領域より2桁狭くする
         self.ensure_rendered(body.width.saturating_sub(HANG_RESERVE));
+        if let Some(page) = self.jump_page.take() {
+            // PDFの見出しはページごとに1つ（1ページだけなら見出しは無く、先頭のまま）
+            if let Some(h) = self.rendered.headings.get(page) {
+                self.scroll = h.line;
+            }
+        }
         self.page_height = body.height.max(1) as usize;
         let total = self.rendered.lines.len();
         let max_scroll = total.saturating_sub(self.page_height);
@@ -499,6 +587,9 @@ impl App {
             "j/k:選ぶ  Enter:飛ぶ  t/Esc:閉じる  q:終了 ".to_string()
         } else if self.search.is_some() {
             "n/N:次/前のヒット  Esc:検索解除  /:再検索  q:終了 ".to_string()
+        } else if self.format == Format::Pdf {
+            "j/k d/u gg/G:移動  ]]/[[:ページ  t:目次  /:検索  i:見た目  r:再読込  q:終了 "
+                .to_string()
         } else {
             "j/k d/u gg/G:移動  ]]/[[:見出し  t:目次  /:検索  U:URL  e:編集  r:再読込  q:終了 "
                 .to_string()
@@ -592,6 +683,10 @@ impl App {
             KeyCode::Char('n') => self.next_match(1),
             KeyCode::Char('N') => self.next_match(-1),
             KeyCode::Char('e') => return Action::Edit,
+            KeyCode::Char('i') if self.format == Format::Pdf => {
+                self.to_image = true;
+                self.quit = true;
+            }
             KeyCode::Char('r') => self.reload(),
             KeyCode::Char('q') => self.quit = true,
             // Escは「解除」に使い、何も解除するものが無い時だけ終了

@@ -2,7 +2,7 @@
 
 ターミナルの中で文書を読み、そのまま編集に入るための道具。Rust製。
 
-ファイラー`folio browse`で辿り、マークダウンをVSCodeのプレビューに近い見やすさで読み、`e`でvimに入る。プレーンテキスト・ソースコード（ハイライト付き）・CSV/TSV（表）・PDF（文字だけ）も読める。マウス操作・vimの移動の練習モードもある。
+ファイラー`folio browse`で辿り、マークダウンをVSCodeのプレビューに近い見やすさで読み、`e`でvimに入る。プレーンテキスト・ソースコード（ハイライト付き）・CSV/TSV（表）も読め、PDFと画像は見た目のまま見られる。マウス操作・vimの移動の練習モードもある。
 
 - 何を作るか: [REQUIREMENTS.md](REQUIREMENTS.md)
 - 今どこにいるか: [PROGRESS.md](PROGRESS.md)
@@ -12,14 +12,12 @@
 ```bash
 cargo install --path .        # ~/.cargo/bin/folio
 cargo install --path . --force   # 入れ直す時。同じ版だと--force無しでは何もせずに終わる
-folio view README.md          # TUIで読む。形式は拡張子で判定（md / csv / tsv / pdf / ソースコード / それ以外はテキスト）
-folio view data.txt --format csv              # 判定を上書き（markdown / code / csv / tsv / text / pdf）
+folio view README.md          # TUIで読む。形式は拡張子で判定（md / csv / tsv / pdf / 画像 / ソースコード / それ以外はテキスト）
+folio view data.txt --format csv              # 判定を上書き（markdown / code / csv / tsv / text / pdf / image）
 folio render --width 80 README.md | less -R   # TUIを開かずANSI出力
 ```
 
 Rustの無いマシンで使う時は、手元でビルドした`~/.cargo/bin/folio`をそのまま相手の`~/.local/bin/`などへコピーすればよい（x86_64のLinuxで、相手のglibcが手元と同じか新しい場合。依存は`libc`・`libm`・`libgcc_s`だけ）。`fb`（下の「シェルから開く」）を使うなら、相手の`.bashrc`にも足す。
-
-PDFは文字だけを抜き出して読む（図・画像・表の罫線は出ない）。抜き出しはpopplerの`pdftotext`に任せるので、使うマシンに入れておく（Debian/Ubuntuなら`sudo apt install poppler-utils`）。PDFの行の折り返しは解いて端末の幅で折り返し直し、各ページの頭に「n / 全ページ」の見出しを置くので、`t`の目次と`]]` `[[`でページを渡れる。段組みの文書は段が混ざることがある。`e`では開かない（ファイラーの`o`で外部アプリへ）。
 
 キーは3層。移動と検索はvim準拠、ページャ的な操作はlessと互換、アプリ操作はvimの移動キーを避ける。
 
@@ -33,6 +31,23 @@ PDFは文字だけを抜き出して読む（図・画像・表の罫線は出�
 | URLの表示切替 | `U` |
 | vimで編集／再読込 | `e`／`r` |
 | 終了 | `q`（`Esc`は解除するものが無い時だけ終了） |
+
+## PDFと画像を見た目で見る
+
+画像ファイル（png・jpg・gif・webp・bmp）とPDFは、端末に画像として描く。PDFは1画面に1ページで、ブラウザで開いた時と同じ見た目（図・画像・レイアウトごと）になる。ファイラーのプレビュー欄にも出る（PDFは1ページ目）。
+
+| 操作 | キー |
+|---|---|
+| 次／前のページ | `j` `k`（`Space` `d` `Enter`でも次、`u`でも前。ホイールでも送れる） |
+| 最初／最後のページ | `gg`／`G` |
+| 文字で読む表示との切り替え（PDFだけ） | `i` |
+| 閉じる | `q` |
+
+描けるのは、Kitty方式かsixelで画像を受け取る端末（Ghostty・kitty・WezTerm・Windows Terminal・Ptyxisなど）。起動した時に端末へ問い合わせて自動で選び、ステータス行に出す。描けない端末では、画像はブロック文字で近似し、PDFは文字の表示から始まる。決め打ちしたい時は環境変数`FOLIO_GRAPHICS`に`kitty`・`sixel`・`halfblocks`のどれかを入れる。tmuxの中で描くのは未確認（`set -g allow-passthrough on`が要る見込み）。
+
+文字で読む表示では、PDFから文字だけを抜き出す（図・画像・表の罫線は出ない）。PDFの行の折り返しを解いて端末の幅で折り返し直し、各ページの頭に「n / 全ページ」の見出しを置くので、`t`の目次と`]]` `[[`でページを渡れる。検索とドラッグでのコピーはこちらで使う。段組みの文書は段が混ざることがある。
+
+PDFはpopplerの`pdftotext`・`pdftoppm`・`pdfinfo`を呼ぶので、使うマシンに入れておく（Debian/Ubuntuなら`sudo apt install poppler-utils`）。PDFと画像は`e`では開かない（ファイラーの`o`で外部アプリへ）。
 
 ## ファイルを選んで読む（ファイラーの第一歩）
 
@@ -138,7 +153,7 @@ url = "darkgray"        # Uキーで表示するURL
 
 ## 状態
 
-P1（ビューアー・vim往復）、P2（目次・検索・表・設定）、P3（テキスト・ソースコード・CSV/TSV）、P4（vimの移動の練習モード）、P5（`folio browse`: 一覧・移動・プレビュー）、P6（作成・改名・ごみ箱）、P7（コピー・移動・外部アプリ）、P8（マウス操作: クリック・ホイール・ドラッグでコピー・右クリックでパス）まで完了。日常の入口はfolioへ。
+P1（ビューアー・vim往復）、P2（目次・検索・表・設定）、P3（テキスト・ソースコード・CSV/TSV）、P4（vimの移動の練習モード）、P5（`folio browse`: 一覧・移動・プレビュー）、P6（作成・改名・ごみ箱）、P7（コピー・移動・外部アプリ）、P8（マウス操作: クリック・ホイール・ドラッグでコピー・右クリックでパス）まで完了。P9（画像を描く: 画像ファイルとPDFの見た目）を進めている。日常の入口はfolioへ。
 
 ## 開発
 
