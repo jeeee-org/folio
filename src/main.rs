@@ -14,11 +14,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// ファイルを整形して表示する（マークダウン・ソースコード・CSV/TSV・テキスト）
+    /// ファイルを整形して表示する（マークダウン・ソースコード・CSV/TSV・テキスト・PDF）
     View {
         /// 表示するファイル
         path: PathBuf,
-        /// 形式を指定する（省略時は拡張子で判定）: markdown / code / csv / tsv / text
+        /// 形式を指定する（省略時は拡張子で判定）: markdown / code / csv / tsv / text / pdf
         #[arg(short, long)]
         format: Option<Format>,
     },
@@ -29,7 +29,7 @@ enum Command {
         /// 折り返し幅（桁）。省略時は環境変数COLUMNS、無ければ80
         #[arg(short, long)]
         width: Option<u16>,
-        /// 形式を指定する（省略時は拡張子で判定）: markdown / code / csv / tsv / text
+        /// 形式を指定する（省略時は拡張子で判定）: markdown / code / csv / tsv / text / pdf
         #[arg(short, long)]
         format: Option<Format>,
     },

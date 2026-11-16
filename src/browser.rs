@@ -30,6 +30,8 @@ use crate::viewer;
 
 /// プレビューで読む上限（バイト）。これより大きいファイルは読まない。
 pub const PREVIEW_MAX_BYTES: u64 = 1024 * 1024;
+/// PDFは文字を抜き出す時間で決まり、数MBでも0.3秒ほどで済むので上限を別に持つ。
+pub const PDF_PREVIEW_MAX_BYTES: u64 = 50 * 1024 * 1024;
 
 /// 同じ項目への2回のクリックをダブルクリックとみなす間隔。
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
@@ -124,12 +126,25 @@ pub enum PreviewSource {
     Skip(String),
 }
 
-/// ファイルをプレビュー用に読む。大きい・UTF-8でない時は理由を返して読まない。
+/// ファイルをプレビュー用に読む。PDFは文字を抜き出す。大きい・UTF-8でない時は理由を返して読まない。
 pub fn read_for_preview(path: &Path) -> PreviewSource {
     let size = match fs::metadata(path) {
         Ok(m) => m.len(),
         Err(e) => return PreviewSource::Skip(format!("読めません: {e}")),
     };
+    if crate::format::is_pdf(path, None) {
+        if size > PDF_PREVIEW_MAX_BYTES {
+            return PreviewSource::Skip(format!(
+                "プレビューなし（{}。{}を超える）",
+                human_size(size),
+                human_size(PDF_PREVIEW_MAX_BYTES)
+            ));
+        }
+        return match crate::pdf::extract(path) {
+            Ok(text) => PreviewSource::Text(text),
+            Err(e) => PreviewSource::Skip(format!("プレビューなし（{e}）")),
+        };
+    }
     if size > PREVIEW_MAX_BYTES {
         return PreviewSource::Skip(format!(
             "プレビューなし（{}。{}を超える）",
@@ -861,6 +876,10 @@ impl<'c> Browser<'c> {
         if entry.is_dir {
             return Ok(());
         }
+        if crate::format::is_pdf(&entry.path, None) {
+            self.message = Some(viewer::PDF_NOT_EDITABLE.to_string());
+            return Ok(());
+        }
         match viewer::open_editor(terminal, &entry.path)? {
             Ok(()) => self.preview = None, // 編集後は読み直す
             Err(message) => self.message = Some(message),
@@ -1351,6 +1370,10 @@ mod tests {
         let bin = dir.join("x.bin");
         fs::write(&bin, [0xff, 0xfe, 0x00]).unwrap();
         assert!(matches!(read_for_preview(&bin), PreviewSource::Skip(r) if r.contains("UTF-8")));
+        // PDFはUTF-8かどうかでなく、文字を抜き出せるかで決まる
+        let pdf = dir.join("x.pdf");
+        fs::write(&pdf, "not a pdf").unwrap();
+        assert!(matches!(read_for_preview(&pdf), PreviewSource::Skip(r) if !r.contains("UTF-8")));
         let txt = dir.join("x.md");
         fs::write(&txt, "# hi").unwrap();
         assert_eq!(read_for_preview(&txt), PreviewSource::Text("# hi".into()));

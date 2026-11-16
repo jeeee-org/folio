@@ -1,11 +1,14 @@
-//! ファイルの形式（マークダウン・ソースコード・CSV/TSV・プレーンテキスト）の判定と、
+//! ファイルの形式（マークダウン・ソースコード・CSV/TSV・プレーンテキスト・PDF）の判定と、
 //! 各形式をブロック構造へ変換する入口。中核の一部で、ターミナルには触らない。
 
 use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
 
+use anyhow::{Context, Result};
+
 use crate::document::{self, Block, Inline};
+use crate::pdf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -14,6 +17,8 @@ pub enum Format {
     Csv,
     Tsv,
     Text,
+    /// 文字だけを抜き出して読む（中身は`pdftotext`の出力）
+    Pdf,
 }
 
 impl Format {
@@ -24,6 +29,7 @@ impl Format {
             "md" | "markdown" | "mdown" | "mkd" => Format::Markdown,
             "csv" => Format::Csv,
             "tsv" => Format::Tsv,
+            "pdf" => Format::Pdf,
             "txt" | "text" | "" => Format::Text,
             e if knows_ext(e) => Format::Code,
             _ => Format::Text,
@@ -41,6 +47,7 @@ impl Format {
             Format::Csv => parse_delimited(source, b','),
             Format::Tsv => parse_delimited(source, b'\t'),
             Format::Text => parse_text(source),
+            Format::Pdf => pdf::parse(source),
         }
     }
 }
@@ -55,8 +62,9 @@ impl FromStr for Format {
             "csv" => Ok(Format::Csv),
             "tsv" => Ok(Format::Tsv),
             "text" | "txt" => Ok(Format::Text),
+            "pdf" => Ok(Format::Pdf),
             other => Err(format!(
-                "{other}は形式として解釈できません（markdown / code / csv / tsv / text）"
+                "{other}は形式として解釈できません（markdown / code / csv / tsv / text / pdf）"
             )),
         }
     }
@@ -70,9 +78,30 @@ impl fmt::Display for Format {
             Format::Csv => "csv",
             Format::Tsv => "tsv",
             Format::Text => "text",
+            Format::Pdf => "pdf",
         };
         f.write_str(name)
     }
+}
+
+/// 形式に応じてファイルの中身を文字列で読む。PDFは文字を抜き出し、他はUTF-8として読む
+/// （文字コードの自動判定はしない）。`format`が無ければ拡張子で決める。
+pub fn read_source(path: &Path, format: Option<Format>) -> Result<String> {
+    if is_pdf(path, format) {
+        return pdf::extract(path);
+    }
+    let bytes = std::fs::read(path).with_context(|| format!("{}を読めません", path.display()))?;
+    String::from_utf8(bytes).with_context(|| {
+        format!(
+            "{}はUTF-8ではありません（他の文字コードには未対応）",
+            path.display()
+        )
+    })
+}
+
+/// PDFとして読むか。形式の指定が無ければ拡張子で決める。
+pub fn is_pdf(path: &Path, format: Option<Format>) -> bool {
+    format.unwrap_or_else(|| Format::detect(path, |_| false)) == Format::Pdf
 }
 
 fn extension(path: &Path) -> String {
@@ -162,13 +191,15 @@ mod tests {
         assert_eq!(d("a.unknownext"), Format::Text);
         assert_eq!(d("LICENSE"), Format::Text);
         assert_eq!(d("a.txt"), Format::Text);
+        assert_eq!(d("a.PDF"), Format::Pdf);
     }
 
     #[test]
     fn format_from_str_accepts_aliases() {
         assert_eq!("md".parse::<Format>().unwrap(), Format::Markdown);
         assert_eq!("TSV".parse::<Format>().unwrap(), Format::Tsv);
-        assert!("pdf".parse::<Format>().is_err());
+        assert_eq!("pdf".parse::<Format>().unwrap(), Format::Pdf);
+        assert!("xlsx".parse::<Format>().is_err());
     }
 
     #[test]

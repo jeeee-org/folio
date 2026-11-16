@@ -1,12 +1,11 @@
 //! ターミナルに文書を表示し、キー操作でスクロールするビューアー。
 //! ターミナル制御はこのモジュールに閉じ込める。
 
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -22,7 +21,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::clipboard;
 use crate::config::Config;
 use crate::document;
-use crate::format::Format;
+use crate::format::{self, Format};
 use crate::highlight::Highlighter;
 use crate::render::{self, Options, Rendered, Theme};
 use crate::search::{self, Match};
@@ -36,6 +35,9 @@ const TOC_MIN_WIDTH: u16 = 24;
 
 /// ホイール1回で動かす行数（項目数）。
 pub const WHEEL_STEP: isize = 5;
+
+/// PDFで`e`を押した時の知らせ。
+pub const PDF_NOT_EDITABLE: &str = "PDFは編集できません（ファイラーのoで外部アプリに開けます）";
 
 /// 端末にマウスを受け取らせているか。エディタに渡す間だけ止めて戻すために覚えておく。
 static MOUSE_CAPTURE: AtomicBool = AtomicBool::new(false);
@@ -61,7 +63,7 @@ pub fn render_to_stdout(
     format: Option<Format>,
 ) -> Result<()> {
     use std::io::Write;
-    let source = read(path)?;
+    let source = format::read_source(path, format)?;
     let theme = config.theme()?;
     let highlighter = Highlighter::with_theme(&config.highlight.theme);
     let format = format.unwrap_or_else(|| Format::detect(path, |e| highlighter.supports(e)));
@@ -102,7 +104,7 @@ pub fn view_in(
     config: &Config,
     format: Option<Format>,
 ) -> Result<()> {
-    let source = read(path)?;
+    let source = format::read_source(path, format)?;
     let mut app = App::new(path, &source, config, format)?;
     let result = app.run(terminal);
     terminal.clear()?;
@@ -176,17 +178,6 @@ pub fn selection_key(
 pub fn copy_to_clipboard(text: &str) -> Result<&'static str> {
     let delivery = clipboard::copy(text)?;
     Ok(clipboard::hint(&delivery, clipboard::is_vte()))
-}
-
-/// ファイルをUTF-8として読む。文字コードの自動判定はしない。
-pub fn read(path: &Path) -> Result<String> {
-    let bytes = fs::read(path).with_context(|| format!("{}を読めません", path.display()))?;
-    String::from_utf8(bytes).with_context(|| {
-        format!(
-            "{}はUTF-8ではありません（他の文字コードには未対応）",
-            path.display()
-        )
-    })
 }
 
 /// キー操作の結果のうち、ターミナルを触る必要があるもの。
@@ -271,7 +262,7 @@ impl App {
 
     /// ファイルを読み直す。失敗したら前の内容を残し、ステータス行で知らせる。
     fn reload(&mut self) {
-        match read(&self.path) {
+        match format::read_source(&self.path, Some(self.format)) {
             Ok(source) => {
                 self.blocks = self.format.parse(&self.path, &source);
                 self.rendered_width = 0;
@@ -282,6 +273,10 @@ impl App {
 
     /// TUIを抜けて`$EDITOR`（既定はvim）で開き、閉じたらTUIに戻って読み直す。
     fn edit(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        if self.format == Format::Pdf {
+            self.message = Some(PDF_NOT_EDITABLE.to_string());
+            return Ok(());
+        }
         match open_editor(terminal, &self.path)? {
             Ok(()) => self.reload(),
             Err(message) => self.message = Some(message),

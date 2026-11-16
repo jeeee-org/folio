@@ -2,7 +2,7 @@
 
 ターミナルの中で文書を読み、そのまま編集に入るための道具。Rust製。
 
-ファイラー`folio browse`で辿り、マークダウンをVSCodeのプレビューに近い見やすさで読み、`e`でvimに入る。プレーンテキスト・ソースコード（ハイライト付き）・CSV/TSV（表）も読める。マウス操作・vimの移動の練習モードもある。
+ファイラー`folio browse`で辿り、マークダウンをVSCodeのプレビューに近い見やすさで読み、`e`でvimに入る。プレーンテキスト・ソースコード（ハイライト付き）・CSV/TSV（表）・PDF（文字だけ）も読める。マウス操作・vimの移動の練習モードもある。
 
 - 何を作るか: [REQUIREMENTS.md](REQUIREMENTS.md)
 - 今どこにいるか: [PROGRESS.md](PROGRESS.md)
@@ -12,12 +12,14 @@
 ```bash
 cargo install --path .        # ~/.cargo/bin/folio
 cargo install --path . --force   # 入れ直す時。同じ版だと--force無しでは何もせずに終わる
-folio view README.md          # TUIで読む。形式は拡張子で判定（md / csv / tsv / ソースコード / それ以外はテキスト）
-folio view data.txt --format csv              # 判定を上書き（markdown / code / csv / tsv / text）
+folio view README.md          # TUIで読む。形式は拡張子で判定（md / csv / tsv / pdf / ソースコード / それ以外はテキスト）
+folio view data.txt --format csv              # 判定を上書き（markdown / code / csv / tsv / text / pdf）
 folio render --width 80 README.md | less -R   # TUIを開かずANSI出力
 ```
 
 Rustの無いマシンで使う時は、手元でビルドした`~/.cargo/bin/folio`をそのまま相手の`~/.local/bin/`などへコピーすればよい（x86_64のLinuxで、相手のglibcが手元と同じか新しい場合。依存は`libc`・`libm`・`libgcc_s`だけ）。`fb`（下の「シェルから開く」）を使うなら、相手の`.bashrc`にも足す。
+
+PDFは文字だけを抜き出して読む（図・画像・表の罫線は出ない）。抜き出しはpopplerの`pdftotext`に任せるので、使うマシンに入れておく（Debian/Ubuntuなら`sudo apt install poppler-utils`）。PDFの行の折り返しは解いて端末の幅で折り返し直し、各ページの頭に「n / 全ページ」の見出しを置くので、`t`の目次と`]]` `[[`でページを渡れる。段組みの文書は段が混ざることがある。`e`では開かない（ファイラーの`o`で外部アプリへ）。
 
 キーは3層。移動と検索はvim準拠、ページャ的な操作はlessと互換、アプリ操作はvimの移動キーを避ける。
 

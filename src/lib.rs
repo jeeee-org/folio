@@ -14,6 +14,7 @@ pub mod fileops;
 pub mod format;
 pub mod highlight;
 pub mod history;
+pub mod pdf;
 pub mod practice;
 pub mod render;
 pub mod search;
