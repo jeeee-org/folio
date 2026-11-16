@@ -12,7 +12,7 @@ P8（ファイラーのマウス操作）を2026-09-15に完了。2026-09-18に�
 ## 次の一手 (Top 3)
 > REQUIREMENTS.mdの「やること / バックログ」から直近の分だけを取り出す。
 
-1. SSHの先のtmuxでPDF・画像の見た目が出るかを利用者が試す。先のマシンに版0.5.1の`folio`とpoppler-utilsを置き、tmuxに`set -g allow-passthrough on`、起動は`FOLIO_GRAPHICS=kitty fb`（tmuxの中では自動で問い合わせない）。結果を見て、tmuxの中で描くのを次の段階にするか決める
+1. SSHの先のtmuxでPDF・画像の見た目が出るかを利用者が試す。先のマシンには版0.5.1の`folio`（musl向けの静的ビルド）とpoppler-utilsを置き済み。tmuxに`set -g allow-passthrough on`、起動は`FOLIO_GRAPHICS=kitty fb`（tmuxの中では自動で問い合わせない）。結果を見て、tmuxの中で描くのを次の段階にするか決める
 2. `fb`で使っていて困った場面を拾う（次の段階の材料）
 3. Ptyxisでのコピーと見た目（sixel）の確認は暇な時に（バックログ）
 
@@ -22,6 +22,7 @@ P8（ファイラーのマウス操作）を2026-09-15に完了。2026-09-18に�
 
 ## 完了
 
+- [x] 2026-11-16 リモートのLinuxの`folio`を0.3.0から0.5.1へ入れ替えた（先のglibcが古いのでmusl向けに静的ビルド。手順はNOTES） → [checkpoint](checkpoints/2026-11-16-リモートへの入れ直し-muslで静的ビルド.md)
 - [x] 2026-11-16 P9完了: 画像ファイルとPDFの見た目を端末に描く（Kitty方式・sixel・ブロック文字）。プレビューでのページめくり、ホイールは1回の操作で1枚（版0.5.1） → [checkpoint](checkpoints/2026-11-16-画像を描く-PDFと画像の見た目.md)
 - [x] 2026-11-16 PDFを文字で読めるようにした（`pdftotext`で抜き出し、ページごとの見出し・行の折り返しを解く。ファイラーのプレビューも。版0.4.0） → [checkpoint](checkpoints/2026-11-16-PDFを文字で読む-pdftotext.md)
 - [x] 2026-11-15 Ptyxis（OSC 52を受け取らない端末）でもコピーが届くよう、`wl-copy`・`xclip`・`xsel`にも渡すようにした（版0.3.1、このPCは`wl-clipboard`を入れて確認済み） → [checkpoint](checkpoints/2026-11-15-Ptyxisでのコピー-デスクトップの道具.md)
