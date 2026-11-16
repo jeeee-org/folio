@@ -107,9 +107,20 @@ pub fn view_in(
     config: &Config,
     format: Option<Format>,
 ) -> Result<()> {
+    view_in_at(terminal, path, config, format, &mut 0)
+}
+
+/// `view_in`と同じ。PDFは`page`（0始まり）のページから開き、閉じた時のページを`page`に返す。
+pub fn view_in_at(
+    terminal: &mut DefaultTerminal,
+    path: &Path,
+    config: &Config,
+    format: Option<Format>,
+    page: &mut usize,
+) -> Result<()> {
     let result = match format::resolve(path, format) {
         Format::Image => view_image(terminal, path),
-        Format::Pdf => view_pdf(terminal, path, config),
+        Format::Pdf => view_pdf(terminal, path, config, page),
         _ => {
             let source = format::read_source(path, format)?;
             let mut app = App::new(path, &source, config, format)?;
@@ -128,11 +139,18 @@ fn view_image(terminal: &mut DefaultTerminal, path: &Path) -> Result<()> {
 }
 
 /// PDFを、描ける端末では見た目で、描けなければ文字で出す。`i`で行き来し、ページは引き継ぐ。
-fn view_pdf(terminal: &mut DefaultTerminal, path: &Path, config: &Config) -> Result<()> {
+fn view_pdf(
+    terminal: &mut DefaultTerminal,
+    path: &Path,
+    config: &Config,
+    page: &mut usize,
+) -> Result<()> {
     let mut visual = None;
     let mut text: Option<App> = None;
-    let mut page = 0;
     let mut image_mode = graphics::can_draw();
+    if !image_mode {
+        text_app(&mut text, path, config)?.jump_page = Some(*page);
+    }
     loop {
         if image_mode {
             if visual.is_none() {
@@ -143,28 +161,29 @@ fn view_pdf(terminal: &mut DefaultTerminal, path: &Path, config: &Config) -> Res
                         image_mode = false;
                         let app = text_app(&mut text, path, config)?;
                         app.message = Some(format!("見た目を出せません: {err:#}"));
+                        app.jump_page = Some(*page);
                         continue;
                     }
                 }
             }
             let v = visual.as_mut().expect("直前に開いた");
-            match pageview::run(terminal, v, &display_name(path), &mut page)? {
+            match pageview::run(terminal, v, &display_name(path), page)? {
                 pageview::Exit::Quit => return Ok(()),
                 pageview::Exit::ToText => {
                     image_mode = false;
-                    text_app(&mut text, path, config)?.jump_page = Some(page);
+                    text_app(&mut text, path, config)?.jump_page = Some(*page);
                 }
             }
         } else {
             let app = text_app(&mut text, path, config)?;
             app.quit = false;
             app.run(terminal)?;
+            // 文字の表示で上端にあるページ（見出しはページごとに1つ）を引き継ぐ
+            *page = app.current_heading().unwrap_or(0);
             if !app.to_image {
                 return Ok(());
             }
             app.to_image = false;
-            // 文字の表示で上端にあるページ（見出しはページごとに1つ）から見た目へ
-            page = app.current_heading().unwrap_or(0);
             image_mode = true;
         }
         terminal.clear()?;

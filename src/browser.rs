@@ -24,6 +24,7 @@ use crate::fileops;
 use crate::format::Format;
 use crate::graphics::Visual;
 use crate::highlight::Highlighter;
+use crate::pageview::{Move, WheelGate, moved};
 use crate::render::{self, Flow, Options, Rendered, TableSpan, Theme};
 use crate::search;
 use crate::select::{self, Dragger};
@@ -261,6 +262,19 @@ struct VisualPreview {
     path: PathBuf,
     /// 開けなければその理由
     visual: Result<Visual, String>,
+    /// 出しているページ（0始まり）
+    page: usize,
+    /// ホイールでめくりすぎないための関所
+    wheel: WheelGate,
+}
+
+impl VisualPreview {
+    /// `delta`枚めくる（範囲に収める）。
+    fn flip(&mut self, delta: isize) {
+        if let Ok(v) = &self.visual {
+            self.page = moved(self.page, v.page_count(), Move::By(delta));
+        }
+    }
 }
 
 /// 見た目でプレビューするか。画像ファイルはいつも（描けない端末ではブロック文字で近似）、
@@ -455,7 +469,15 @@ impl<'c> Browser<'c> {
                 } else {
                     -viewer::WHEEL_STEP
                 };
-                if self.preview_area.contains(at) {
+                if self.preview_area.contains(at)
+                    && let Some(vp) = self.visual_preview.as_mut()
+                {
+                    // 見た目のプレビューでは、1回の操作で1枚めくる
+                    if !vp.wheel.accept(Instant::now()) {
+                        return Ok(false);
+                    }
+                    vp.flip(step.signum());
+                } else if self.preview_area.contains(at) {
                     self.scroll_preview(step);
                 } else if self.list_area.contains(at) {
                     self.move_cursor(step);
@@ -884,7 +906,22 @@ impl<'c> Browser<'c> {
             return Ok(());
         }
         let format = Format::detect(&entry.path, |e| self.highlighter.supports(e));
-        if let Err(err) = viewer::view_in(terminal, &entry.path, self.config, Some(format)) {
+        // 見た目のプレビューでめくったページから開き、閉じたページをプレビューに残す
+        let mut page = self
+            .visual_preview
+            .as_ref()
+            .filter(|vp| vp.path == entry.path)
+            .map_or(0, |vp| vp.page);
+        let result =
+            viewer::view_in_at(terminal, &entry.path, self.config, Some(format), &mut page);
+        if let Some(vp) = self
+            .visual_preview
+            .as_mut()
+            .filter(|vp| vp.path == entry.path)
+        {
+            vp.page = page;
+        }
+        if let Err(err) = result {
             terminal.clear()?;
             self.message = Some(format!("開けません: {err:#}"));
         }
@@ -909,7 +946,12 @@ impl<'c> Browser<'c> {
         Ok(())
     }
 
+    /// プレビューを`J`/`K`で動かす。見た目のプレビューでは1枚めくり、文字なら行を送る。
     fn scroll_preview(&mut self, delta: isize) {
+        if let Some(vp) = &mut self.visual_preview {
+            vp.flip(delta.signum());
+            return;
+        }
         let height = self.preview_inner.height as usize;
         if let Some(p) = &mut self.preview {
             p.scroll = p
@@ -1022,6 +1064,8 @@ impl<'c> Browser<'c> {
             self.visual_preview = Some(VisualPreview {
                 path: path.to_path_buf(),
                 visual: Visual::open(path, format).map_err(|e| format!("{e:#}")),
+                page: 0,
+                wheel: WheelGate::default(),
             });
         }
         let Some(vp) = &mut self.visual_preview else {
@@ -1037,7 +1081,7 @@ impl<'c> Browser<'c> {
                 return;
             }
         };
-        match visual.page(0, Size::new(body.width, body.height)) {
+        match visual.page(vp.page, Size::new(body.width, body.height)) {
             Ok(protocol) => {
                 let at = crate::graphics::centered(protocol, body);
                 frame.render_widget(ratatui_image::Image::new(protocol), at);
@@ -1046,7 +1090,12 @@ impl<'c> Browser<'c> {
         }
         let text = match visual.dimensions() {
             Some((w, h)) => format!("{w}×{h}"),
-            None => format!("1 / {}ページ（Enterで全ページ）", visual.page_count()),
+            None if visual.page_count() > 1 => format!(
+                "{} / {}ページ（J/Kかホイールでめくる・Enterで全画面）",
+                vp.page + 1,
+                visual.page_count()
+            ),
+            None => "1 / 1ページ（Enterで全画面）".to_string(),
         };
         frame.render_widget(Paragraph::new(Line::from(text).dim()), caption);
     }

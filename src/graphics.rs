@@ -11,6 +11,7 @@ use image::ImageDecoder;
 use image::imageops::FilterType;
 use ratatui::layout::{Rect, Size};
 use ratatui_image::Resize;
+use ratatui_image::picker::cap_parser::QueryStdioOptions;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
 
@@ -23,15 +24,25 @@ const CACHE_PAGES: usize = 8;
 
 /// 端末に描き方を問い合わせる。TUIを始めた直後（キーを読む前）に1回だけ呼ぶ。
 /// 環境変数`FOLIO_GRAPHICS`（`kitty` / `sixel` / `iterm2` / `halfblocks`）で描き方を決め打ちできる。
+/// tmux・screenの中では問い合わせない（下の`in_multiplexer`）。
 pub fn init() {
     if PICKER.get().is_some() {
         return;
     }
     let forced = std::env::var("FOLIO_GRAPHICS").ok();
-    let mut picker = if forced.as_deref() == Some("halfblocks") {
-        Picker::halfblocks()
+    let query = match forced.as_deref() {
+        Some("halfblocks") => false,
+        Some(_) => true,
+        None => !in_multiplexer(),
+    };
+    let mut picker = if query {
+        let options = QueryStdioOptions {
+            timeout: QUERY_TIMEOUT,
+            ..QueryStdioOptions::default()
+        };
+        Picker::from_query_stdio_with_options(options).unwrap_or_else(|_| Picker::halfblocks())
     } else {
-        Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())
+        Picker::halfblocks()
     };
     match forced.as_deref() {
         Some("kitty") => picker.set_protocol_type(ProtocolType::Kitty),
@@ -40,6 +51,17 @@ pub fn init() {
         _ => {}
     }
     let _ = PICKER.set(picker);
+}
+
+/// 問い合わせの答えを待つ長さ。答える端末は数ミリ秒で返す。
+const QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// tmux・screenの中か。中では問い合わせを外の端末へ包んで送るが、tmuxが
+/// `allow-passthrough`を許していないと誰も答えず、答えを待つ読み手が後から打ったキーを
+/// 横取りしてしまう（起動直後のキーが効かなくなる）。描くのは次の段階なので、中では問い合わせない。
+fn in_multiplexer() -> bool {
+    std::env::var_os("TMUX").is_some()
+        || std::env::var("TERM").is_ok_and(|t| t.starts_with("tmux") || t.starts_with("screen"))
 }
 
 fn picker() -> &'static Picker {
