@@ -287,6 +287,12 @@ struct App {
     blocks: Vec<document::Block>,
     rendered: Rendered,
     rendered_width: u16,
+    /// 描いた時の本文の高さ（画像を画面の高さに収めるのに使う）
+    rendered_rows: u16,
+    /// 本文の高さ（次に描く時の値）
+    body_rows: u16,
+    /// マークダウンの中の画像
+    images: graphics::InlineImages,
     theme: Theme,
     highlighter: Highlighter,
     scroll: usize,
@@ -339,6 +345,9 @@ impl App {
             blocks: format.parse(path, source),
             rendered: Rendered::default(),
             rendered_width: 0,
+            rendered_rows: 0,
+            body_rows: 0,
+            images: graphics::InlineImages::new(path),
             theme: config.theme()?,
             highlighter,
             scroll: 0,
@@ -366,6 +375,7 @@ impl App {
         match format::read_source(&self.path, Some(self.format)) {
             Ok(source) => {
                 self.blocks = self.format.parse(&self.path, &source);
+                self.images.clear();
                 self.rendered_width = 0;
             }
             Err(err) => self.message = Some(format!("再読み込みに失敗: {err}")),
@@ -450,23 +460,28 @@ impl App {
         Ok(true)
     }
 
-    /// 本文の折り返し幅が変わっていたら描き直す。
+    /// 本文の折り返し幅が変わっていたら描き直す。画像がある時は本文の高さが変わっても描き直す。
     fn ensure_rendered(&mut self, wrap_width: u16) {
-        if wrap_width == self.rendered_width {
+        let rows_changed = self.body_rows != self.rendered_rows && !self.rendered.images.is_empty();
+        if wrap_width == self.rendered_width && !rows_changed {
             return;
         }
         // 幅が変わると行番号がずれるので、直前の見出しからの相対位置で画面上端を保つ
         let anchor = self
             .current_heading()
             .map(|i| (i, self.scroll - self.rendered.headings[i].line));
-        self.rendered = render::render_with(
+        let rows = self.body_rows;
+        let images = &mut self.images;
+        self.rendered = render::render_with_images(
             &self.blocks,
             wrap_width,
             &self.theme,
             Some(&self.highlighter),
             &self.options,
+            &mut |src, avail| images.size(src, avail, rows),
         );
         self.rendered_width = wrap_width;
+        self.rendered_rows = rows;
         // 行の位置が変わるので、選択は捨てる
         self.drag.clear();
         if let Some((i, offset)) = anchor
@@ -496,6 +511,7 @@ impl App {
         let body = body_column(body, self.max_width);
         self.body = body;
 
+        self.body_rows = body.height;
         // 行頭禁則でぶら下がる句読点（最大2桁）を切らないよう、折り返し幅は描画領域より2桁狭くする
         self.ensure_rendered(body.width.saturating_sub(HANG_RESERVE));
         if let Some(page) = self.jump_page.take() {
@@ -514,6 +530,8 @@ impl App {
             .map(|i| self.line_with_matches(i))
             .collect();
         frame.render_widget(Paragraph::new(Text::from(visible)), body);
+        self.images
+            .draw(frame, body, &self.rendered.images, self.scroll);
         if let Some(toc) = toc {
             self.draw_toc(frame, toc);
         }

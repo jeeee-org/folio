@@ -1,6 +1,7 @@
 //! 画像を端末に描く部品。画像ファイルとPDFのページを、端末の描き方（Kitty方式・sixel、
 //! 描けなければブロック文字）に合わせて用意する。端末の問い合わせは起動時に1回だけ。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -9,13 +10,19 @@ use anyhow::{Context, Result, anyhow, bail};
 use image::DynamicImage;
 use image::ImageDecoder;
 use image::imageops::FilterType;
+use ratatui::Frame;
 use ratatui::layout::{Rect, Size};
+use ratatui::style::Stylize;
+use ratatui::text::Line;
+use ratatui::widgets::Paragraph;
 use ratatui_image::Resize;
 use ratatui_image::picker::cap_parser::QueryStdioOptions;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
+use ratatui_image::sliced::{SignedPosition, SlicedImage, SlicedProtocol};
 
 use crate::format::Format;
+use crate::render::ImageSlot;
 
 static PICKER: OnceLock<Picker> = OnceLock::new();
 
@@ -179,6 +186,211 @@ impl Visual {
             .new_protocol(image, area, Resize::Fit(Some(FilterType::Triangle)))
             .map_err(|e| anyhow!("画像にできません: {e}"))
     }
+}
+
+/// 覚えておく本文の中の画像の数。
+const CACHE_INLINE: usize = 24;
+
+/// マークダウンの中の画像。パスをmdファイルの場所から解決し、描く大きさを見積もり、
+/// 描いたものを覚えておく。スクロールで端にかかった画像は見えている行だけを描く。
+pub struct InlineImages {
+    /// mdファイルのあるフォルダ
+    base: PathBuf,
+    /// `src`ごとの画素数（読めなければ`None`）
+    dims: HashMap<String, Option<(u32, u32)>>,
+    /// 描いたもの（`src`・大きさ・結果）。新しいものほど後ろ
+    drawn: Vec<(String, Size, Result<SlicedProtocol, String>)>,
+}
+
+impl InlineImages {
+    /// `doc`はmdファイルのパス。
+    pub fn new(doc: &Path) -> Self {
+        let base = doc
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+        Self {
+            base,
+            dims: HashMap::new(),
+            drawn: Vec::new(),
+        }
+    }
+
+    /// 覚えたものを捨てる（ファイルを読み直した時）。
+    pub fn clear(&mut self) {
+        self.dims.clear();
+        self.drawn.clear();
+    }
+
+    /// `src`を描く大きさ（桁・行）。`avail`桁・`max_rows`行に収め、元の画素より大きくしない。
+    /// 読めない画像は`None`。
+    pub fn size(&mut self, src: &str, avail: usize, max_rows: u16) -> Option<(u16, u16)> {
+        let (w, h) = self.dimensions(src)?;
+        let font = picker().font_size();
+        cell_size(
+            (w, h),
+            (u32::from(font.width), u32::from(font.height)),
+            avail,
+            max_rows,
+        )
+    }
+
+    fn dimensions(&mut self, src: &str) -> Option<(u32, u32)> {
+        if let Some(d) = self.dims.get(src) {
+            return *d;
+        }
+        let d = resolve_image(&self.base, src).and_then(|p| image_dimensions(&p));
+        self.dims.insert(src.to_string(), d);
+        d
+    }
+
+    /// 本文の`area`に、`scroll`行目から見えている画像を描く。
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect, slots: &[ImageSlot], scroll: usize) {
+        let bottom = scroll + usize::from(area.height);
+        for slot in slots {
+            let end = slot.line + usize::from(slot.height);
+            if end <= scroll || slot.line >= bottom {
+                continue;
+            }
+            let size = Size::new(slot.width, slot.height);
+            let base = self.base.clone();
+            let entry = self.entry(&slot.src, size, || {
+                let path =
+                    resolve_image(&base, &slot.src).ok_or_else(|| "見つかりません".to_string())?;
+                let img = load_image(&path).map_err(|e| format!("{e:#}"))?;
+                SlicedProtocol::new_with_resize(
+                    picker(),
+                    img,
+                    size,
+                    Resize::Fit(Some(FilterType::Triangle)),
+                )
+                .map_err(|e| format!("画像にできません: {e}"))
+            });
+            let y = slot.line as i64 - scroll as i64;
+            match entry {
+                Ok(protocol) => {
+                    let position = SignedPosition {
+                        x: slot.col.min(usize::from(area.width)) as i16,
+                        y: y.clamp(-i64::from(i16::MAX), i64::from(i16::MAX)) as i16,
+                    };
+                    frame.render_widget(SlicedImage::new(protocol, position), area);
+                }
+                Err(e) => {
+                    // 見えている最初の行に知らせる
+                    let row = area.y + y.max(0) as u16;
+                    let x = area.x + (slot.col as u16).min(area.width);
+                    let at = Rect::new(x, row, area.right().saturating_sub(x), 1);
+                    let text = format!("[画像: {}（{e}）]", slot.src);
+                    frame.render_widget(Paragraph::new(Line::from(text).red()), at);
+                }
+            }
+        }
+    }
+
+    fn entry(
+        &mut self,
+        src: &str,
+        size: Size,
+        make: impl FnOnce() -> Result<SlicedProtocol, String>,
+    ) -> &Result<SlicedProtocol, String> {
+        if let Some(i) = self
+            .drawn
+            .iter()
+            .position(|(s, z, _)| s == src && *z == size)
+        {
+            let hit = self.drawn.remove(i);
+            self.drawn.push(hit);
+        } else {
+            let made = make();
+            if self.drawn.len() >= CACHE_INLINE {
+                drop(self.drawn.remove(0));
+            }
+            self.drawn.push((src.to_string(), size, made));
+        }
+        &self.drawn.last().expect("直前に入れた").2
+    }
+}
+
+/// 画素`(w, h)`の画像を、文字の大きさ`font`（画素）で`avail`桁・`max_rows`行に収める桁数・行数。
+/// 元の画素より大きくはしない。
+fn cell_size(
+    (w, h): (u32, u32),
+    (fw, fh): (u32, u32),
+    avail: usize,
+    max_rows: u16,
+) -> Option<(u16, u16)> {
+    if w == 0 || h == 0 || fw == 0 || fh == 0 || avail == 0 || max_rows == 0 {
+        return None;
+    }
+    let max_w = (avail as u32).min(u32::from(u16::MAX)) * fw;
+    let max_h = u32::from(max_rows) * fh;
+    let (pw, ph) = if w <= max_w && h <= max_h {
+        (w, h)
+    } else {
+        fit(f64::from(w), f64::from(h), max_w, max_h)
+    };
+    let cols = pw.div_ceil(fw).clamp(1, avail as u32);
+    let rows = ph.div_ceil(fh).clamp(1, u32::from(max_rows));
+    Some((cols as u16, rows as u16))
+}
+
+/// マークダウンに書かれた画像のパスを、mdファイルのあるフォルダ`base`から解決する。
+/// URL（`http:`など）・`data:`は扱わない。`%20`のような符号はほどく。
+pub fn resolve_image(base: &Path, src: &str) -> Option<PathBuf> {
+    let src = src.trim();
+    let src = src.strip_prefix("file://").unwrap_or(src);
+    if src.is_empty() || src.contains("://") || src.starts_with("data:") {
+        return None;
+    }
+    let decoded = percent_decode(src);
+    let path = Path::new(&decoded);
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+    path.is_file().then_some(path)
+}
+
+/// `%XX`をほどく。UTF-8として読めなければ元のまま。
+fn percent_decode(s: &str) -> String {
+    if !s.contains('%') {
+        return s.to_string();
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Some(b) = std::str::from_utf8(&bytes[i + 1..i + 3])
+                .ok()
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(b);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+/// 画像の画素数を、中身を全部は読まずに調べる（写真の向きを反映する）。
+fn image_dimensions(path: &Path) -> Option<(u32, u32)> {
+    let reader = image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?;
+    let mut decoder = reader.into_decoder().ok()?;
+    let (w, h) = decoder.dimensions();
+    let swap = decoder.orientation().is_ok_and(|o| {
+        use image::metadata::Orientation::*;
+        matches!(o, Rotate90 | Rotate270 | Rotate90FlipH | Rotate270FlipH)
+    });
+    Some(if swap { (h, w) } else { (w, h) })
 }
 
 /// 描いたものを`area`の中央に置く場所。
@@ -392,6 +604,56 @@ mod tests {
         assert_eq!(v.page_count(), 1);
         assert!(v.page(0, Size::new(20, 10)).is_ok());
         assert!(v.page(1, Size::new(20, 10)).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn inline_image_size_fits_width_and_height_without_enlarging() {
+        // 文字は10×20画素とする
+        // 小さい画像は元の大きさ（端数は切り上げ）
+        assert_eq!(cell_size((95, 41), (10, 20), 80, 30), Some((10, 3)));
+        // 幅で縮める
+        assert_eq!(cell_size((1600, 400), (10, 20), 80, 30), Some((80, 10)));
+        // 高さで縮める
+        assert_eq!(cell_size((400, 2000), (10, 20), 80, 25), Some((10, 25)));
+        assert_eq!(cell_size((400, 2000), (10, 20), 80, 0), None);
+    }
+
+    #[test]
+    fn inline_image_path_is_resolved_from_the_document_folder() {
+        let dir = std::env::temp_dir().join(format!("folio-gfx-md-{}", std::process::id()));
+        let docs = dir.join("notes/sub");
+        let figs = dir.join("trials/fig a");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::create_dir_all(&figs).unwrap();
+        let png = figs.join("5-点と費用.png");
+        DynamicImage::new_rgb8(30, 20).save(&png).unwrap();
+        let doc = docs.join("a.md");
+        let images = InlineImages::new(&doc);
+        let found = resolve_image(&images.base, "../../trials/fig a/5-点と費用.png");
+        assert_eq!(
+            found.map(|p| p.canonicalize().unwrap()),
+            Some(png.canonicalize().unwrap())
+        );
+        // 符号化されたパス・絶対パス
+        assert!(
+            resolve_image(
+                &images.base,
+                "../../trials/fig%20a/5-%E7%82%B9%E3%81%A8%E8%B2%BB%E7%94%A8.png"
+            )
+            .is_some()
+        );
+        assert!(resolve_image(&images.base, png.to_str().unwrap()).is_some());
+        // 無いもの・URL
+        assert!(resolve_image(&images.base, "../nothing.png").is_none());
+        assert!(resolve_image(&images.base, "https://example.com/a.png").is_none());
+        let mut images = images;
+        assert_eq!(
+            images.dimensions("../../trials/fig a/5-点と費用.png"),
+            Some((30, 20))
+        );
+        // 相対パスのmdファイル名（フォルダが空）でも今のフォルダから探す
+        assert_eq!(InlineImages::new(Path::new("a.md")).base, Path::new("."));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -24,6 +24,11 @@ pub enum Block {
     },
     BlockQuote(Vec<Block>),
     Rule,
+    /// 段落に画像だけが書かれていたもの。`src`は書かれたままのパス（解決は描画側）
+    Image {
+        src: String,
+        alt: String,
+    },
     Table {
         aligns: Vec<Align>,
         header: Vec<Vec<Inline>>,
@@ -78,6 +83,43 @@ impl Inline {
     }
 }
 
+/// 段落が画像（と空白・改行）だけなら、画像ごとのブロックにする。
+fn images_only(inlines: &[Inline], images: &[(usize, usize, String)]) -> Option<Vec<Block>> {
+    if images.is_empty() {
+        return None;
+    }
+    let inside = |i: usize| images.iter().any(|&(f, t, _)| (f..t).contains(&i));
+    let only = inlines
+        .iter()
+        .enumerate()
+        .all(|(i, inline)| inside(i) || inline.text.trim().is_empty());
+    if !only {
+        return None;
+    }
+    Some(
+        images
+            .iter()
+            .map(|(from, to, src)| Block::Image {
+                src: src.clone(),
+                alt: inlines[from + 1..to - 1]
+                    .iter()
+                    .map(|i| i.text.as_str())
+                    .collect(),
+            })
+            .collect(),
+    )
+}
+
+/// パスの最後の部分（代替テキストが空の画像の目印に使う）。
+fn image_file_name(src: &str) -> String {
+    let name = src.rsplit(['/', '\\']).next().unwrap_or(src);
+    if name.is_empty() {
+        src.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 /// マークダウン文字列を解析する。
 pub fn parse(markdown: &str) -> Vec<Block> {
     let options =
@@ -125,7 +167,16 @@ struct Builder {
     stack: Vec<Container>,
     leaf: Option<Leaf>,
     style: InlineStyle,
+    /// 開いている画像（パスと、`[画像: `を置いた葉の中の位置）
+    image: Option<(String, usize)>,
+    /// 今の葉に書かれた画像（`[画像: `から`]`までの位置`[from, to)`とパス）
+    leaf_images: Vec<(usize, usize, String)>,
+    /// 葉の中でこれより前のインラインには繋げない（画像の目印の位置がずれないように）
+    seal: usize,
 }
+
+/// 文の途中の画像や読めない画像を、文字で出す時の目印。
+pub const IMAGE_OPEN: &str = "[画像: ";
 
 impl Builder {
     fn event(&mut self, event: Event<'_>) {
@@ -222,8 +273,15 @@ impl Builder {
             Tag::Strong => self.style.bold = true,
             Tag::Strikethrough => self.style.strike = true,
             Tag::Link { dest_url, .. } => self.style.link = Some(dest_url.into_string()),
-            // 画像はP1では描画しない。代替テキストを目印付きで出す。
-            Tag::Image { .. } => self.text("[画像: "),
+            // 画像は代替テキストを目印付きで出しておき、段落に画像しか無ければ閉じる時に
+            // Block::Imageへ置き換える（文の途中の画像は文字のまま）
+            Tag::Image { dest_url, .. } => {
+                self.seal = self.leaf_len();
+                self.push_inline(Inline::plain(IMAGE_OPEN));
+                let at = self.leaf_len().saturating_sub(1);
+                self.seal = self.leaf_len();
+                self.image = Some((dest_url.into_string(), at));
+            }
             Tag::HtmlBlock => {
                 self.close_leaf();
                 self.leaf = Some(Leaf::Paragraph(Vec::new()));
@@ -302,6 +360,10 @@ impl Builder {
                 }
             }
             TagEnd::TableCell => {
+                // セルの中の画像は文字のまま
+                self.leaf_images.clear();
+                self.image = None;
+                self.seal = 0;
                 if let Some(Leaf::TableCell(inlines)) = self.leaf.take()
                     && let Some(Container::Table { row, .. }) = self.stack.last_mut()
                 {
@@ -312,7 +374,7 @@ impl Builder {
             TagEnd::Strong => self.style.bold = false,
             TagEnd::Strikethrough => self.style.strike = false,
             TagEnd::Link => self.style.link = None,
-            TagEnd::Image => self.text("]"),
+            TagEnd::Image => self.end_image(),
             TagEnd::MetadataBlock(_)
             | TagEnd::DefinitionList
             | TagEnd::DefinitionListTitle
@@ -320,6 +382,29 @@ impl Builder {
             | TagEnd::Superscript
             | TagEnd::Subscript => {}
         }
+    }
+
+    /// 今の葉のインラインの数。
+    fn leaf_len(&self) -> usize {
+        match &self.leaf {
+            Some(Leaf::Paragraph(v) | Leaf::Heading(_, v) | Leaf::TableCell(v)) => v.len(),
+            _ => 0,
+        }
+    }
+
+    fn end_image(&mut self) {
+        let Some((src, from)) = self.image.take() else {
+            self.text("]");
+            return;
+        };
+        if self.leaf_len() == from + 1 {
+            // 代替テキストが空ならファイル名を出す
+            self.push_inline(Inline::plain(image_file_name(&src)));
+        }
+        self.seal = self.leaf_len();
+        self.push_inline(Inline::plain("]"));
+        self.seal = self.leaf_len();
+        self.leaf_images.push((from, self.leaf_len(), src));
     }
 
     fn text(&mut self, text: &str) {
@@ -351,9 +436,11 @@ impl Builder {
             }
         };
         // 同じ装飾の断片は繋げておく（描画側の折り返しが楽になる）
+        let sealed = inlines.len() <= self.seal;
         match inlines.last_mut() {
             Some(last)
-                if last.style == inline.style
+                if !sealed
+                    && last.style == inline.style
                     && !last.is_line_break()
                     && !inline.is_line_break() =>
             {
@@ -364,10 +451,19 @@ impl Builder {
     }
 
     fn close_leaf(&mut self) {
+        let images = std::mem::take(&mut self.leaf_images);
+        self.image = None;
+        self.seal = 0;
         let Some(leaf) = self.leaf.take() else { return };
         let block = match leaf {
             Leaf::Paragraph(inlines) => {
                 if inlines.is_empty() {
+                    return;
+                }
+                if let Some(blocks) = images_only(&inlines, &images) {
+                    for block in blocks {
+                        self.push_block(block);
+                    }
                     return;
                 }
                 Block::Paragraph(inlines)
@@ -520,5 +616,47 @@ mod tests {
         let blocks = parse("> 引用\n\n---\n");
         assert!(matches!(&blocks[0], Block::BlockQuote(inner) if inner.len() == 1));
         assert_eq!(blocks[1], Block::Rule);
+    }
+
+    #[test]
+    fn image_alone_in_paragraph_becomes_image_block() {
+        let blocks = parse("前\n\n![](../../a/5-点と費用.png)\n\n後\n");
+        assert_eq!(
+            blocks[1],
+            Block::Image {
+                src: "../../a/5-点と費用.png".into(),
+                alt: "5-点と費用.png".into()
+            }
+        );
+        // 2枚続けて書けば2つのブロック。リンクで囲っても画像として扱う
+        let blocks = parse("![図 *1*](a.png)\n[![](b.png)](http://x)\n");
+        assert_eq!(
+            blocks,
+            vec![
+                Block::Image {
+                    src: "a.png".into(),
+                    alt: "図 1".into()
+                },
+                Block::Image {
+                    src: "b.png".into(),
+                    alt: "b.png".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn image_inside_text_stays_as_text() {
+        let blocks = parse("前の文 ![図](a.png) 後の文\n");
+        let Block::Paragraph(inlines) = &blocks[0] else {
+            panic!("{blocks:?}");
+        };
+        assert_eq!(text_of(inlines), "前の文 [画像: 図] 後の文");
+        // 表のセルの中も文字のまま
+        let blocks = parse("|a|\n|-|\n|![](x.png)|\n");
+        let Block::Table { rows, .. } = &blocks[0] else {
+            panic!("{blocks:?}");
+        };
+        assert_eq!(text_of(&rows[0][0]), "[画像: x.png]");
     }
 }

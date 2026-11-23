@@ -69,7 +69,24 @@ pub struct Rendered {
     pub flow: Vec<Flow>,
     /// 描いた表の位置。ドラッグを1つのセルに閉じ込めるのに使う
     pub tables: Vec<TableSpan>,
+    /// 本文の中に描く画像の場所（その行は空けてある）
+    pub images: Vec<ImageSlot>,
 }
+
+/// 本文の中に描く画像1枚の場所。行は`Rendered::lines`の添字、桁は行頭からの表示幅。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageSlot {
+    pub line: usize,
+    pub col: usize,
+    /// 占める桁数・行数
+    pub width: u16,
+    pub height: u16,
+    /// 書かれたままのパス
+    pub src: String,
+}
+
+/// 画像の`src`と使える桁数から、描く大きさ（桁・行）を返す。描けなければ`None`（文字で出す）。
+pub type ImageSizer<'a> = dyn FnMut(&str, usize) -> Option<(u16, u16)> + 'a;
 
 /// 描画後の表1つの位置。行は`Rendered::lines`の添字、桁は行頭からの表示幅。
 #[derive(Debug, Clone, Default)]
@@ -171,12 +188,36 @@ pub struct Options {
 }
 
 /// 配色とハイライターを指定して描く。`highlighter`が`None`ならコードは単色。
+/// 画像は描かず、`[画像: 代替テキスト]`の文字で出す。
 pub fn render_with(
     blocks: &[Block],
     width: u16,
     theme: &Theme,
     highlighter: Option<&Highlighter>,
     options: &Options,
+) -> Rendered {
+    render_full(blocks, width, theme, highlighter, options, None)
+}
+
+/// `render_with`と同じ。画像は`sizer`が返す大きさの場所を空け、`Rendered::images`に書く。
+pub fn render_with_images(
+    blocks: &[Block],
+    width: u16,
+    theme: &Theme,
+    highlighter: Option<&Highlighter>,
+    options: &Options,
+    sizer: &mut ImageSizer<'_>,
+) -> Rendered {
+    render_full(blocks, width, theme, highlighter, options, Some(sizer))
+}
+
+fn render_full(
+    blocks: &[Block],
+    width: u16,
+    theme: &Theme,
+    highlighter: Option<&Highlighter>,
+    options: &Options,
+    sizer: Option<&mut ImageSizer<'_>>,
 ) -> Rendered {
     let mut renderer = Renderer {
         width: (width as usize).max(MIN_WIDTH),
@@ -187,9 +228,16 @@ pub fn render_with(
         headings: Vec::new(),
         flow: Vec::new(),
         tables: Vec::new(),
+        sizer,
+        images: Vec::new(),
     };
     renderer.blocks(blocks, &Prefix::default(), false);
-    while renderer.lines.last().is_some_and(is_blank) {
+    // 末尾の空行は捨てる。画像のために空けた行は残す
+    let keep = renderer
+        .images
+        .last()
+        .map_or(0, |i| i.line + usize::from(i.height));
+    while renderer.lines.len() > keep && renderer.lines.last().is_some_and(is_blank) {
         renderer.lines.pop();
         renderer.flow.pop();
     }
@@ -198,6 +246,7 @@ pub fn render_with(
         headings: renderer.headings,
         flow: renderer.flow,
         tables: renderer.tables,
+        images: renderer.images,
     }
 }
 
@@ -234,7 +283,7 @@ impl Prefix {
     }
 }
 
-struct Renderer<'t> {
+struct Renderer<'t, 's> {
     width: usize,
     theme: &'t Theme,
     highlighter: Option<&'t Highlighter>,
@@ -243,9 +292,11 @@ struct Renderer<'t> {
     headings: Vec<Heading>,
     flow: Vec<Flow>,
     tables: Vec<TableSpan>,
+    sizer: Option<&'t mut ImageSizer<'s>>,
+    images: Vec<ImageSlot>,
 }
 
-impl Renderer<'_> {
+impl Renderer<'_, '_> {
     fn avail(&self, prefix: &Prefix) -> usize {
         self.width.saturating_sub(prefix.width()).max(MIN_WIDTH)
     }
@@ -316,6 +367,33 @@ impl Renderer<'_> {
                 header,
                 rows,
             } => self.table(aligns, header, rows, prefix),
+            Block::Image { src, alt } => self.image(src, alt, prefix),
+        }
+    }
+
+    /// 画像。描けるなら大きさの分だけ行を空け、描けなければ`[画像: 代替テキスト]`の文字で出す。
+    fn image(&mut self, src: &str, alt: &str, prefix: &Prefix) {
+        let avail = self.avail(prefix);
+        let size = self
+            .sizer
+            .as_mut()
+            .and_then(|f| f(src, avail))
+            .filter(|&(w, h)| w > 0 && h > 0);
+        let Some((width, height)) = size else {
+            let text = format!("{}{alt}]", crate::document::IMAGE_OPEN);
+            self.paragraph(&[Inline::plain(text)], prefix, Style::default());
+            return;
+        };
+        self.images.push(ImageSlot {
+            line: self.lines.len(),
+            col: prefix.width(),
+            width,
+            height,
+            src: src.to_string(),
+        });
+        for i in 0..height {
+            let p = if i == 0 { &prefix.first } else { &prefix.rest };
+            self.emit(p, Vec::new());
         }
     }
 
@@ -1042,5 +1120,64 @@ mod tests {
         let text = plain(&lines);
         assert_eq!(text[0], " 1. x");
         assert_eq!(text[9], "10. x");
+    }
+
+    #[test]
+    fn image_reserves_lines_and_falls_back_to_text() {
+        let blocks = crate::document::parse("前\n\n- ![図](a.png)\n\n![](b.png)\n");
+        let theme = Theme::default();
+        let mut asked = Vec::new();
+        let r = render_with_images(
+            &blocks,
+            40,
+            &theme,
+            None,
+            &Options::default(),
+            &mut |src, avail| {
+                asked.push((src.to_string(), avail));
+                (src == "a.png").then_some((10, 3))
+            },
+        );
+        // リストの記号の分だけ使える幅が減る
+        assert_eq!(asked, vec![("a.png".into(), 38), ("b.png".into(), 40)]);
+        assert_eq!(
+            r.images,
+            vec![ImageSlot {
+                line: 2,
+                col: 2,
+                width: 10,
+                height: 3,
+                src: "a.png".into()
+            }]
+        );
+        let text: Vec<String> = r.lines.iter().map(|l| l.to_string()).collect();
+        assert_eq!(text[2].trim(), "•");
+        assert_eq!(text[3].trim(), "");
+        assert_eq!(text[4].trim(), "");
+        // 描けない画像は文字で出す
+        assert_eq!(text.last().unwrap(), "[画像: b.png]");
+        // 画像なしの描き方でも文字で出す
+        let plain = render_with(&blocks, 40, &theme, None, &Options::default());
+        assert!(plain.images.is_empty());
+        assert!(
+            plain
+                .lines
+                .iter()
+                .any(|l| l.to_string().contains("[画像: 図]"))
+        );
+    }
+
+    #[test]
+    fn trailing_image_lines_are_kept() {
+        let blocks = crate::document::parse("![](a.png)\n");
+        let r = render_with_images(
+            &blocks,
+            40,
+            &Theme::default(),
+            None,
+            &Options::default(),
+            &mut |_, _| Some((5, 4)),
+        );
+        assert_eq!(r.lines.len(), 4);
     }
 }

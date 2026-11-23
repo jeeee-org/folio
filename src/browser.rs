@@ -22,10 +22,11 @@ use unicode_width::UnicodeWidthStr;
 use crate::config::Config;
 use crate::fileops;
 use crate::format::Format;
+use crate::graphics::InlineImages;
 use crate::graphics::Visual;
 use crate::highlight::Highlighter;
 use crate::pageview::{Move, WheelGate, moved};
-use crate::render::{self, Flow, Options, Rendered, TableSpan, Theme};
+use crate::render::{self, Flow, ImageSlot, Options, Rendered, TableSpan, Theme};
 use crate::search;
 use crate::select::{self, Dragger};
 use crate::viewer;
@@ -296,6 +297,11 @@ struct Preview {
     flow: Vec<Flow>,
     /// 描いた表の位置（ドラッグをセルに閉じ込めるのに使う）
     tables: Vec<TableSpan>,
+    /// マークダウンの中の画像の場所と、描いたもの
+    images: Vec<ImageSlot>,
+    store: InlineImages,
+    /// 作った時の欄の高さ（画像を欄に収めるのに使う）
+    rows: u16,
     scroll: usize,
     /// フォルダの中身のプレビューなら、その項目（行と同じ順）。ファイルなら空
     children: Vec<Entry>,
@@ -1032,7 +1038,7 @@ impl<'c> Browser<'c> {
             return;
         }
         self.visual_preview = None;
-        self.ensure_preview(inner.width);
+        self.ensure_preview(inner.width, inner.height);
         let selection = self.drag.selection();
         let Some(p) = &mut self.preview else {
             return;
@@ -1055,6 +1061,7 @@ impl<'c> Browser<'c> {
             .collect();
         let text = Text::from(lines);
         frame.render_widget(Paragraph::new(text), inner);
+        p.store.draw(frame, inner, &p.images, scroll);
     }
 
     /// 画像・PDFの見た目のプレビュー。下の1行に大きさかページ数を添える。
@@ -1100,8 +1107,8 @@ impl<'c> Browser<'c> {
         frame.render_widget(Paragraph::new(Line::from(text).dim()), caption);
     }
 
-    /// カーソルの項目か幅が変わっていたらプレビューを作り直す。
-    fn ensure_preview(&mut self, width: u16) {
+    /// カーソルの項目か幅が変わっていたらプレビューを作り直す。画像がある時は高さが変わっても。
+    fn ensure_preview(&mut self, width: u16, rows: u16) {
         let Some(entry) = self.current().cloned() else {
             self.preview = None;
             return;
@@ -1109,24 +1116,25 @@ impl<'c> Browser<'c> {
         if let Some(p) = &self.preview
             && p.path == entry.path
             && p.width == width
+            && (p.rows == rows || p.images.is_empty())
         {
             return;
         }
-        let scroll = self
-            .preview
-            .as_ref()
-            .filter(|p| p.path == entry.path)
-            .map(|p| p.scroll)
-            .unwrap_or(0);
+        let old = self.preview.take().filter(|p| p.path == entry.path);
+        let scroll = old.as_ref().map_or(0, |p| p.scroll);
+        let mut store = old.map_or_else(|| InlineImages::new(&entry.path), |p| p.store);
         let (
             Rendered {
                 lines,
                 flow,
                 tables,
+                images,
                 ..
             },
             children,
-        ) = self.build_preview(&entry, width);
+        ) = self.build_preview(&entry, width, &mut |src, avail| {
+            store.size(src, avail, rows)
+        });
         // 描き直すと行の位置が変わるので、選択は捨てる
         self.drag.clear();
         self.preview = Some(Preview {
@@ -1135,13 +1143,21 @@ impl<'c> Browser<'c> {
             lines,
             flow,
             tables,
+            images,
+            store,
+            rows,
             scroll,
             children,
         });
     }
 
     /// プレビューの行と、フォルダならその中身の項目（行と同じ順）。
-    fn build_preview(&self, entry: &Entry, width: u16) -> (Rendered, Vec<Entry>) {
+    fn build_preview(
+        &self,
+        entry: &Entry,
+        width: u16,
+        sizer: &mut render::ImageSizer<'_>,
+    ) -> (Rendered, Vec<Entry>) {
         if entry.is_dir {
             return match list_dir(&entry.path, self.show_hidden) {
                 Ok(entries) if entries.is_empty() => (
@@ -1175,12 +1191,13 @@ impl<'c> Browser<'c> {
             PreviewSource::Text(source) => {
                 let format = Format::detect(&entry.path, |e| self.highlighter.supports(e));
                 let blocks = format.parse(&entry.path, &source);
-                let rendered = render::render_with(
+                let rendered = render::render_with_images(
                     &blocks,
                     width.saturating_sub(2),
                     &self.theme,
                     Some(&self.highlighter),
                     &Options::default(),
+                    sizer,
                 );
                 (rendered, Vec::new())
             }
@@ -1347,14 +1364,14 @@ mod tests {
         let mut b = Browser::new(dir.clone(), &config).unwrap();
         // カーソルは先頭のsub/。右にその中身（inner/、a.md）が出る
         b.preview_inner = Rect::new(40, 0, 40, 10);
-        b.ensure_preview(40);
+        b.ensure_preview(40, 20);
         let at = |y| b.preview_child_at(Position::new(45, y)).map(|e| e.name);
         assert_eq!(at(0).as_deref(), Some("inner"));
         assert_eq!(at(1).as_deref(), Some("a.md"));
         assert_eq!(at(2), None);
         // ファイルのプレビューには項目が無い（ドラッグ選択に回る）
         b.set_cursor(1);
-        b.ensure_preview(40);
+        b.ensure_preview(40, 20);
         assert!(b.preview.as_ref().unwrap().children.is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
