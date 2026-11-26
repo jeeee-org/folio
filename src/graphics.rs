@@ -20,6 +20,7 @@ use ratatui_image::picker::cap_parser::QueryStdioOptions;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::protocol::Protocol;
 use ratatui_image::sliced::{SignedPosition, SlicedImage, SlicedProtocol};
+use resvg::usvg;
 
 use crate::format::Format;
 use crate::render::ImageSlot;
@@ -101,6 +102,8 @@ pub struct Visual {
 enum Kind {
     /// 読み込んだ画像（向きは直してある）
     Image(DynamicImage),
+    /// 読み込んだSVG（描く時に欄の大きさで画素にする）
+    Svg(Box<usvg::Tree>),
     /// ページごとの大きさ（ポイント。回転を反映した幅・高さ）
     Pdf(Vec<(f64, f64)>),
 }
@@ -110,6 +113,7 @@ impl Visual {
     pub fn open(path: &Path, format: Format) -> Result<Self> {
         let kind = match format {
             Format::Pdf => Kind::Pdf(pdf_page_sizes(path)?),
+            _ if is_svg(path) => Kind::Svg(Box::new(load_svg(path)?)),
             _ => Kind::Image(load_image(path)?),
         };
         Ok(Self {
@@ -125,15 +129,16 @@ impl Visual {
 
     pub fn page_count(&self) -> usize {
         match &self.kind {
-            Kind::Image(_) => 1,
+            Kind::Image(_) | Kind::Svg(_) => 1,
             Kind::Pdf(pages) => pages.len(),
         }
     }
 
-    /// 画像の画素数（画像ファイルだけ）。
+    /// 画像の画素数（画像ファイルだけ。SVGは書かれた幅・高さ）。
     pub fn dimensions(&self) -> Option<(u32, u32)> {
         match &self.kind {
             Kind::Image(img) => Some((img.width(), img.height())),
+            Kind::Svg(tree) => Some(svg_size(tree)),
             Kind::Pdf(_) => None,
         }
     }
@@ -174,6 +179,17 @@ impl Visual {
         }
         let image = match &self.kind {
             Kind::Image(img) => img.clone(),
+            Kind::Svg(tree) => {
+                // ベクターなので欄いっぱいの大きさで描く（小さなアイコンも拡大してぼやけない）
+                let size = tree.size();
+                let (pw, ph) = fit(
+                    f64::from(size.width()),
+                    f64::from(size.height()),
+                    max_w,
+                    max_h,
+                );
+                rasterize_svg(tree, pw, ph)?
+            }
             Kind::Pdf(pages) => {
                 let &(w, h) = pages
                     .get(page)
@@ -258,7 +274,22 @@ impl InlineImages {
             let entry = self.entry(&slot.src, size, || {
                 let path =
                     resolve_image(&base, &slot.src).ok_or_else(|| "見つかりません".to_string())?;
-                let img = load_image(&path).map_err(|e| format!("{e:#}"))?;
+                let img = if is_svg(&path) {
+                    load_svg(&path).and_then(|tree| {
+                        let font = picker().font_size();
+                        let size = tree.size();
+                        let (pw, ph) = fit(
+                            f64::from(size.width()),
+                            f64::from(size.height()),
+                            u32::from(slot.width) * u32::from(font.width),
+                            u32::from(slot.height) * u32::from(font.height),
+                        );
+                        rasterize_svg(&tree, pw, ph)
+                    })
+                } else {
+                    load_image(&path)
+                }
+                .map_err(|e| format!("{e:#}"))?;
                 SlicedProtocol::new_with_resize(
                     picker(),
                     img,
@@ -380,6 +411,9 @@ fn percent_decode(s: &str) -> String {
 
 /// 画像の画素数を、中身を全部は読まずに調べる（写真の向きを反映する）。
 fn image_dimensions(path: &Path) -> Option<(u32, u32)> {
+    if is_svg(path) {
+        return load_svg(path).ok().map(|tree| svg_size(&tree));
+    }
     let reader = image::ImageReader::open(path)
         .ok()?
         .with_guessed_format()
@@ -433,6 +467,120 @@ fn load_image(path: &Path) -> Result<DynamicImage> {
         img.apply_orientation(o);
     }
     Ok(img)
+}
+
+/// 拡張子がSVG（`.svg`・`.svgz`）か。
+fn is_svg(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg") || e.eq_ignore_ascii_case("svgz"))
+}
+
+/// このPCのフォント。SVGの中の文字を描くのに使う。最初のSVGを開いた時に1回だけ読む。
+fn fonts() -> std::sync::Arc<usvg::fontdb::Database> {
+    static FONTS: OnceLock<std::sync::Arc<usvg::fontdb::Database>> = OnceLock::new();
+    FONTS
+        .get_or_init(|| {
+            let mut db = usvg::fontdb::Database::new();
+            db.load_system_fonts();
+            set_generic_families(&mut db);
+            std::sync::Arc::new(db)
+        })
+        .clone()
+}
+
+/// `sans-serif`のような総称のフォント名に、このPCにあるフォントを当てる。fontdbの既定は
+/// ArialやTimes New Romanで、無いPCでは文字が1つも描かれない。fontconfigの選び方（日本語）に
+/// 従い、`fc-match`が無ければ候補から、それも無ければ最初に見つかったフォントにする。
+fn set_generic_families(db: &mut usvg::fontdb::Database) {
+    let names: Vec<String> = db
+        .faces()
+        .flat_map(|f| f.families.iter().map(|(name, _)| name.clone()))
+        .collect();
+    let Some(first) = names.first().cloned() else {
+        return; // フォントが1つも無い
+    };
+    let pick = |generic: &str, candidates: &[&str]| -> String {
+        let matched = Command::new("fc-match")
+            .args(["-f", "%{family[0]}", &format!("{generic}:lang=ja")])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok());
+        matched
+            .into_iter()
+            .chain(candidates.iter().map(|c| c.to_string()))
+            .find(|name| names.contains(name))
+            .unwrap_or_else(|| first.clone())
+    };
+    const SANS: &[&str] = &[
+        "Noto Sans CJK JP",
+        "Noto Sans JP",
+        "IPAexGothic",
+        "IPAGothic",
+        "DejaVu Sans",
+        "Liberation Sans",
+    ];
+    let sans = pick("sans-serif", SANS);
+    let serif = pick(
+        "serif",
+        &[
+            "Noto Serif CJK JP",
+            "Noto Serif JP",
+            "IPAexMincho",
+            "DejaVu Serif",
+            "Liberation Serif",
+        ],
+    );
+    let mono = pick(
+        "monospace",
+        &[
+            "Noto Sans Mono CJK JP",
+            "DejaVu Sans Mono",
+            "Liberation Mono",
+        ],
+    );
+    db.set_serif_family(serif);
+    db.set_monospace_family(mono);
+    db.set_cursive_family(sans.clone());
+    db.set_fantasy_family(sans.clone());
+    db.set_sans_serif_family(sans);
+}
+
+/// SVGファイルを読む（`.svgz`は自動でほどける）。中で参照する画像はSVGのあるフォルダから探す。
+fn load_svg(path: &Path) -> Result<usvg::Tree> {
+    let data = std::fs::read(path).with_context(|| format!("{}を読めません", path.display()))?;
+    let options = usvg::Options {
+        resources_dir: path.parent().map(Path::to_path_buf),
+        fontdb: fonts(),
+        ..usvg::Options::default()
+    };
+    usvg::Tree::from_data(&data, &options)
+        .map_err(|e| anyhow!("{}はSVGとして読めません: {e}", path.display()))
+}
+
+/// SVGに書かれた幅・高さ（画素。端数は切り上げ）。
+fn svg_size(tree: &usvg::Tree) -> (u32, u32) {
+    let size = tree.size();
+    (
+        (size.width().ceil() as u32).max(1),
+        (size.height().ceil() as u32).max(1),
+    )
+}
+
+/// SVGを幅`w`・高さ`h`の画素に描く。透明なところは白で埋める（暗い端末で黒い線が消えないように）。
+fn rasterize_svg(tree: &usvg::Tree, w: u32, h: u32) -> Result<DynamicImage> {
+    let mut pixmap =
+        resvg::tiny_skia::Pixmap::new(w, h).ok_or_else(|| anyhow!("SVGを描く場所がありません"))?;
+    pixmap.fill(resvg::tiny_skia::Color::WHITE);
+    let size = tree.size();
+    let transform =
+        resvg::tiny_skia::Transform::from_scale(w as f32 / size.width(), h as f32 / size.height());
+    resvg::render(tree, transform, &mut pixmap.as_mut());
+    // 白で埋めたので不透明。乗算済みの色をそのまま使える
+    let image = image::RgbaImage::from_raw(w, h, pixmap.take())
+        .ok_or_else(|| anyhow!("SVGを画像にできません"))?;
+    Ok(DynamicImage::ImageRgba8(image))
 }
 
 /// `pdfinfo`でページごとの大きさを読む（回転していれば幅と高さを入れ替える）。
@@ -574,6 +722,46 @@ mod tests {
         let size = v.page(0, Size::new(30, 10)).unwrap().size();
         assert!(size.width <= 30 && size.height <= 10, "{size:?}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    const SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20" viewBox="0 0 4 2"><rect x="0" y="0" width="2" height="2" fill="#f00"/></svg>"##;
+
+    #[test]
+    fn svg_file_is_drawn_into_the_area_on_white() {
+        let dir = std::env::temp_dir().join(format!("folio-gfx-svg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.svg");
+        std::fs::write(&path, SVG).unwrap();
+        let mut v = Visual::open(&path, Format::Image).unwrap();
+        assert_eq!(v.page_count(), 1);
+        assert_eq!(v.dimensions(), Some((40, 20)));
+        let size = v.page(0, Size::new(30, 10)).unwrap().size();
+        assert!(size.width <= 30 && size.height <= 10, "{size:?}");
+        // 左半分は赤、右半分は透明だったところが白
+        let Kind::Svg(tree) = &v.kind else {
+            panic!("SVGとして開いていない")
+        };
+        let img = rasterize_svg(tree, 80, 40).unwrap().to_rgba8();
+        assert_eq!(img.get_pixel(10, 20).0, [255, 0, 0, 255]);
+        assert_eq!(img.get_pixel(70, 20).0, [255, 255, 255, 255]);
+        // マークダウンの中から参照した時も大きさが分かる
+        assert_eq!(image_dimensions(&path), Some((40, 20)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn broken_svg_is_reported() {
+        let dir = std::env::temp_dir().join(format!("folio-gfx-svg-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.svg");
+        std::fs::write(&path, "<svg").unwrap();
+        let err = Visual::open(&path, Format::Image)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(image_dimensions(&path).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(err.contains("SVGとして読めません"), "{err}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "folio"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 
 [dependencies]
@@ -12,6 +12,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 pulldown-cmark = "0.13.4"
 ratatui = "0.30.2"
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
+resvg = "0.50.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }

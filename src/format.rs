@@ -32,7 +32,7 @@ impl Format {
             "csv" => Format::Csv,
             "tsv" => Format::Tsv,
             "pdf" => Format::Pdf,
-            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => Format::Image,
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "svgz" => Format::Image,
             "txt" | "text" | "" => Format::Text,
             e if knows_ext(e) => Format::Code,
             _ => Format::Text,
@@ -217,6 +217,8 @@ mod tests {
         assert_eq!(d("a.PDF"), Format::Pdf);
         assert_eq!(d("a.JPG"), Format::Image);
         assert_eq!(d("a.webp"), Format::Image);
+        assert_eq!(d("a.SVG"), Format::Image);
+        assert_eq!(d("a.svgz"), Format::Image);
     }
 
     #[test]
