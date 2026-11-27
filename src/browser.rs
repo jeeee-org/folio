@@ -258,6 +258,19 @@ fn is_double_click(prev: Option<(Instant, usize)>, now: Instant, index: usize) -
     prev.is_some_and(|(at, i)| i == index && now.saturating_duration_since(at) <= DOUBLE_CLICK)
 }
 
+/// 文字のプレビューの下の1行。見えている行の範囲（1始まり）と全体の行数、効くキー。
+/// 全部が欄に収まっていればスクロールのキーは書かない。
+fn scroll_caption(scroll: usize, height: usize, total: usize) -> String {
+    if total <= height {
+        return format!("{total}行（Enterで全画面）");
+    }
+    let end = (scroll + height).min(total);
+    format!(
+        "{}〜{end} / {total}行（J/Kかホイールでスクロール・Enterで全画面）",
+        scroll + 1
+    )
+}
+
 /// 見た目で出すプレビュー（画像ファイルと、描ける端末でのPDF）。
 struct VisualPreview {
     path: PathBuf,
@@ -305,6 +318,8 @@ struct Preview {
     scroll: usize,
     /// フォルダの中身のプレビューなら、その項目（行と同じ順）。ファイルなら空
     children: Vec<Entry>,
+    /// ファイルの中身を読んで描いたか（下の1行に位置とキーを添える）
+    text: bool,
 }
 
 struct Browser<'c> {
@@ -1041,6 +1056,16 @@ impl<'c> Browser<'c> {
             return;
         }
         self.visual_preview = None;
+        // ファイルなら下の1行を位置とキーの説明に空けておく（フォルダの中身には出さない）
+        let file = self.current().is_some_and(|e| !e.is_dir);
+        let (inner, caption) = if file && inner.height >= 2 {
+            let [body, caption] =
+                Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+            (body, Some(caption))
+        } else {
+            (inner, None)
+        };
+        self.preview_inner = inner;
         self.ensure_preview(inner.width, inner.height);
         let selection = self.drag.selection();
         let Some(p) = &mut self.preview else {
@@ -1065,6 +1090,12 @@ impl<'c> Browser<'c> {
         let text = Text::from(lines);
         frame.render_widget(Paragraph::new(text), inner);
         p.store.draw(frame, inner, &p.images, scroll);
+        if let Some(caption) = caption
+            && p.text
+        {
+            let line = Line::from(scroll_caption(scroll, height, p.lines.len())).dim();
+            frame.render_widget(Paragraph::new(line), caption);
+        }
     }
 
     /// 画像・PDFの見た目のプレビュー。下の1行に大きさかページ数を添える。
@@ -1138,6 +1169,7 @@ impl<'c> Browser<'c> {
                 ..
             },
             children,
+            text,
         ) = self.build_preview(&entry, width, &mut |src, want, avail| {
             store.size(src, want, avail, rows)
         });
@@ -1154,21 +1186,23 @@ impl<'c> Browser<'c> {
             rows,
             scroll,
             children,
+            text,
         });
     }
 
-    /// プレビューの行と、フォルダならその中身の項目（行と同じ順）。
+    /// プレビューの行と、フォルダならその中身の項目（行と同じ順）と、ファイルの中身を描いたか。
     fn build_preview(
         &self,
         entry: &Entry,
         width: u16,
         sizer: &mut render::ImageSizer<'_>,
-    ) -> (Rendered, Vec<Entry>) {
+    ) -> (Rendered, Vec<Entry>, bool) {
         if entry.is_dir {
             return match list_dir(&entry.path, self.show_hidden) {
                 Ok(entries) if entries.is_empty() => (
                     lines_only(vec![Line::from("（空のディレクトリ）").dim()]),
                     Vec::new(),
+                    false,
                 ),
                 Ok(entries) => {
                     let lines = entries
@@ -1184,16 +1218,21 @@ impl<'c> Browser<'c> {
                             }
                         })
                         .collect();
-                    (lines_only(lines), entries)
+                    (lines_only(lines), entries, false)
                 }
                 Err(err) => (
                     lines_only(vec![Line::from(err.to_string()).red()]),
                     Vec::new(),
+                    false,
                 ),
             };
         }
         match read_for_preview(&entry.path) {
-            PreviewSource::Skip(reason) => (lines_only(vec![Line::from(reason).dim()]), Vec::new()),
+            PreviewSource::Skip(reason) => (
+                lines_only(vec![Line::from(reason).dim()]),
+                Vec::new(),
+                false,
+            ),
             PreviewSource::Text(source) => {
                 let format = Format::detect(&entry.path, |e| self.highlighter.supports(e));
                 let blocks = format.parse(&entry.path, &source);
@@ -1205,7 +1244,7 @@ impl<'c> Browser<'c> {
                     &Options::default(),
                     sizer,
                 );
-                (rendered, Vec::new())
+                (rendered, Vec::new(), true)
             }
         }
     }
@@ -1380,6 +1419,19 @@ mod tests {
         b.ensure_preview(40, 20);
         assert!(b.preview.as_ref().unwrap().children.is_empty());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn scroll_caption_shows_range_and_keys_only_when_needed() {
+        assert_eq!(scroll_caption(0, 30, 12), "12行（Enterで全画面）");
+        assert_eq!(
+            scroll_caption(11, 29, 180),
+            "12〜40 / 180行（J/Kかホイールでスクロール・Enterで全画面）"
+        );
+        assert_eq!(
+            scroll_caption(151, 29, 180),
+            "152〜180 / 180行（J/Kかホイールでスクロール・Enterで全画面）"
+        );
     }
 
     #[test]
