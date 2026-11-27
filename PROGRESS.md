@@ -21,7 +21,7 @@ P8（ファイラーのマウス操作）を2026-09-15に完了。2026-09-18に�
 
 ## 完了
 
-- [x] 2026-11-27 マークダウンの`<img src width height>`を描き、大きさの指定（画素・%）と、指定の無い画像の最大幅の設定`view.image_max_width`を足した（版0.8.0。tmuxの中のブロック文字で大きさを確認、Ghosttyでは未確認） → [checkpoint](checkpoints/2026-11-27-画像の大きさ指定-imgタグ.md)
+- [x] 2026-11-27 マークダウンの`<img src width height>`を描き、大きさの指定（画素・%）と、指定の無い画像の最大幅の設定`view.image_max_width`を足した（版0.8.0。tmuxの中のブロック文字で大きさを確認、Ghosttyでは未確認。リモートのLinuxも0.8.0へ入れ替え済み） → [checkpoint](checkpoints/2026-11-27-画像の大きさ指定-imgタグ.md)
 - [x] 2026-11-26 P11完了: SVGを描く（ファイル・プレビュー・マークダウンの中。欄の大きさで描き直し、背景は白、文字はこのPCのフォント。版0.7.0、Ghosttyで確認済み。リモートのLinuxも0.7.0へ入れ替え、先での表示も確認済み） → [checkpoint](checkpoints/2026-11-26-SVGを描く-resvgで画素にする.md)
 - [x] 2026-11-26 P10完了: マークダウンの中の画像をその場所に描く（版0.6.0、Ghosttyで確認済み） → [checkpoint](checkpoints/2026-11-23-マークダウンの中の画像-段落の画像を描く.md)
 - [x] 2026-11-16 リモートのLinuxの`folio`を0.3.0から0.5.1へ入れ替えた（先のglibcが古いのでmusl向けに静的ビルド。手順はNOTES）。先でPDFの見た目が出るのを確認済み（tmuxの外） → [checkpoint](checkpoints/2026-11-16-リモートへの入れ直し-muslで静的ビルド.md)
