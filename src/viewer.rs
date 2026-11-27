@@ -347,7 +347,7 @@ impl App {
             rendered_width: 0,
             rendered_rows: 0,
             body_rows: 0,
-            images: graphics::InlineImages::new(path),
+            images: graphics::InlineImages::new(path, image_max_width(config)),
             theme: config.theme()?,
             highlighter,
             scroll: 0,
@@ -478,7 +478,7 @@ impl App {
             &self.theme,
             Some(&self.highlighter),
             &self.options,
-            &mut |src, avail| images.size(src, avail, rows),
+            &mut |src, want, avail| images.size(src, want, avail, rows),
         );
         self.rendered_width = wrap_width;
         self.rendered_rows = rows;
@@ -852,6 +852,14 @@ fn next_heading(headings: &[render::Heading], scroll: usize) -> Option<usize> {
 
 fn prev_heading(headings: &[render::Heading], scroll: usize) -> Option<usize> {
     headings.iter().rposition(|h| h.line < scroll)
+}
+
+/// 大きさの指定が無い画像の最大幅（読み込み時に確かめてあるので、読めなければ全幅）。
+pub fn image_max_width(config: &Config) -> crate::document::Length {
+    config
+        .view
+        .image_max_width()
+        .unwrap_or(crate::document::Length::Percent(100))
 }
 
 #[cfg(test)]

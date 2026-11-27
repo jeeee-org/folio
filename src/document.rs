@@ -24,16 +24,63 @@ pub enum Block {
     },
     BlockQuote(Vec<Block>),
     Rule,
-    /// 段落に画像だけが書かれていたもの。`src`は書かれたままのパス（解決は描画側）
+    /// 段落に画像だけが書かれていたもの。`src`は書かれたままのパス（解決は描画側）。
+    /// `size`は`<img width height>`で指定された大きさ（`![]()`なら指定なし）
     Image {
         src: String,
         alt: String,
+        size: ImageSize,
     },
     Table {
         aligns: Vec<Align>,
         header: Vec<Vec<Inline>>,
         rows: Vec<Vec<Vec<Inline>>>,
     },
+}
+
+/// 画像の幅・高さの指定（`<img width="640">`・`width="50%"`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ImageSize {
+    pub width: Option<Length>,
+    pub height: Option<Length>,
+}
+
+/// 長さ。画素か、表示欄の幅に対する割合（%）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Length {
+    Px(u32),
+    Percent(u32),
+}
+
+impl Length {
+    /// `640`・`640px`・`50%`を読む。0以下や読めないものは`None`。
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        let (number, percent) = match text.strip_suffix('%') {
+            Some(n) => (n, true),
+            None => (text.strip_suffix("px").unwrap_or(text), false),
+        };
+        let n: f64 = number.trim().parse().ok()?;
+        if !n.is_finite() || n < 0.5 {
+            return None;
+        }
+        let n = n.round().min(f64::from(u32::MAX)) as u32;
+        Some(if percent {
+            Self::Percent(n)
+        } else {
+            Self::Px(n)
+        })
+    }
+
+    /// 全体`whole`に対する長さ（画素）。
+    pub fn of(self, whole: u32) -> u32 {
+        match self {
+            Self::Px(n) => n,
+            Self::Percent(p) => {
+                (u64::from(whole) * u64::from(p) / 100).min(u64::from(u32::MAX)) as u32
+            }
+        }
+    }
 }
 
 /// リストの1項目。タスクリスト（`- [ ]`）ならチェック状態を持つ。
@@ -83,31 +130,109 @@ impl Inline {
     }
 }
 
-/// 段落が画像（と空白・改行）だけなら、画像ごとのブロックにする。
-fn images_only(inlines: &[Inline], images: &[(usize, usize, String)]) -> Option<Vec<Block>> {
+/// 葉に書かれた画像1枚。`[画像: `から`]`までのインラインの位置`[from, to)`とパス・大きさ。
+#[derive(Debug)]
+struct LeafImage {
+    from: usize,
+    to: usize,
+    src: String,
+    size: ImageSize,
+}
+
+/// 段落が画像（と空白・改行、画像を包むだけのHTMLのタグ）だけなら、画像ごとのブロックにする。
+/// `wrappers`は包むだけのタグのインラインの位置。
+fn images_only(inlines: &[Inline], images: &[LeafImage], wrappers: &[usize]) -> Option<Vec<Block>> {
     if images.is_empty() {
         return None;
     }
-    let inside = |i: usize| images.iter().any(|&(f, t, _)| (f..t).contains(&i));
+    let inside = |i: usize| images.iter().any(|m| (m.from..m.to).contains(&i));
     let only = inlines
         .iter()
         .enumerate()
-        .all(|(i, inline)| inside(i) || inline.text.trim().is_empty());
+        .all(|(i, inline)| inside(i) || wrappers.contains(&i) || inline.text.trim().is_empty());
     if !only {
         return None;
     }
     Some(
         images
             .iter()
-            .map(|(from, to, src)| Block::Image {
-                src: src.clone(),
-                alt: inlines[from + 1..to - 1]
+            .map(|m| Block::Image {
+                src: m.src.clone(),
+                alt: inlines[m.from + 1..m.to - 1]
                     .iter()
                     .map(|i| i.text.as_str())
                     .collect(),
+                size: m.size,
             })
             .collect(),
     )
+}
+
+/// 画像を包むだけで、段落に画像しか無いなら捨ててよいHTMLのタグ。
+const WRAPPER_TAGS: &[&str] = &["p", "div", "center", "a", "picture", "source", "span", "br"];
+
+/// HTMLのタグ`<...>`の名前（小文字）と属性。閉じタグは名前の頭に`/`が付く。
+fn parse_tag(tag: &str) -> Option<(String, Vec<(String, String)>)> {
+    let inner = tag.strip_prefix('<')?.strip_suffix('>')?;
+    let inner = inner.strip_suffix('/').unwrap_or(inner);
+    let name_end = inner
+        .find(|c: char| c.is_whitespace())
+        .unwrap_or(inner.len());
+    let name = inner[..name_end].to_ascii_lowercase();
+    let body = name.strip_prefix('/').unwrap_or(&name);
+    if body.is_empty() || !body.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return None;
+    }
+    let mut attrs = Vec::new();
+    let mut rest = &inner[name_end..];
+    loop {
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '/');
+        if rest.is_empty() {
+            break;
+        }
+        let key_end = rest
+            .find(|c: char| c.is_whitespace() || c == '=' || c == '/')
+            .unwrap_or(rest.len());
+        let key = rest[..key_end].to_ascii_lowercase();
+        rest = rest[key_end..].trim_start();
+        let mut value = String::new();
+        if let Some(after) = rest.strip_prefix('=') {
+            let after = after.trim_start();
+            let (v, next) = match after.chars().next() {
+                Some(q @ ('"' | '\'')) => {
+                    let body = &after[1..];
+                    let end = body.find(q).unwrap_or(body.len());
+                    (&body[..end], body.get(end + 1..).unwrap_or(""))
+                }
+                _ => {
+                    let end = after
+                        .find(|c: char| c.is_whitespace())
+                        .unwrap_or(after.len());
+                    (&after[..end], &after[end..])
+                }
+            };
+            value = decode_entities(v);
+            rest = next;
+        }
+        if key.is_empty() {
+            break;
+        }
+        attrs.push((key, value));
+    }
+    Some((name, attrs))
+}
+
+/// HTMLの文字参照のうち、属性によく出るものだけをほどく。
+fn decode_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    s.replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 /// パスの最後の部分（代替テキストが空の画像の目印に使う）。
@@ -169,8 +294,12 @@ struct Builder {
     style: InlineStyle,
     /// 開いている画像（パスと、`[画像: `を置いた葉の中の位置）
     image: Option<(String, usize)>,
-    /// 今の葉に書かれた画像（`[画像: `から`]`までの位置`[from, to)`とパス）
-    leaf_images: Vec<(usize, usize, String)>,
+    /// 今の葉に書かれた画像
+    leaf_images: Vec<LeafImage>,
+    /// 今の葉にある、画像を包むだけのHTMLのタグのインラインの位置
+    leaf_wrappers: Vec<usize>,
+    /// 閉じていないHTMLのタグ（`<img`の途中で行が変わった時など）。次のHTMLと繋いで読む
+    html_pending: String,
     /// 葉の中でこれより前のインラインには繋げない（画像の目印の位置がずれないように）
     seal: usize,
 }
@@ -180,6 +309,9 @@ pub const IMAGE_OPEN: &str = "[画像: ";
 
 impl Builder {
     fn event(&mut self, event: Event<'_>) {
+        if !matches!(event, Event::Html(_) | Event::InlineHtml(_)) {
+            self.flush_html();
+        }
         match event {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
@@ -203,8 +335,8 @@ impl Builder {
                     *task = Some(checked);
                 }
             }
-            // HTMLや数式は整形しない。素のテキストとして見せる。
-            Event::Html(text) | Event::InlineHtml(text) => self.text(&text),
+            // HTMLは`<img>`だけ画像として読み、ほかは素のテキストとして見せる。数式も整形しない
+            Event::Html(text) | Event::InlineHtml(text) => self.html(&text),
             Event::InlineMath(text) | Event::DisplayMath(text) => self.text(&text),
             Event::FootnoteReference(name) => self.text(&format!("[^{name}]")),
         }
@@ -361,7 +493,9 @@ impl Builder {
             }
             TagEnd::TableCell => {
                 // セルの中の画像は文字のまま
+                self.flush_html();
                 self.leaf_images.clear();
+                self.leaf_wrappers.clear();
                 self.image = None;
                 self.seal = 0;
                 if let Some(Leaf::TableCell(inlines)) = self.leaf.take()
@@ -404,7 +538,101 @@ impl Builder {
         self.seal = self.leaf_len();
         self.push_inline(Inline::plain("]"));
         self.seal = self.leaf_len();
-        self.leaf_images.push((from, self.leaf_len(), src));
+        self.leaf_images.push(LeafImage {
+            from,
+            to: self.leaf_len(),
+            src,
+            size: ImageSize::default(),
+        });
+    }
+
+    /// HTMLの断片。`<img>`は画像に、画像を包むだけのタグは目印を付けて素のまま、
+    /// ほかは素のテキストにする。閉じていないタグは次の断片と繋いで読む。
+    fn html(&mut self, text: &str) {
+        if let Some(Leaf::Code { code, .. }) = &mut self.leaf {
+            code.push_str(text);
+            return;
+        }
+        let mut buf = std::mem::take(&mut self.html_pending);
+        buf.push_str(text);
+        let mut rest = buf.as_str();
+        while !rest.is_empty() {
+            let Some(lt) = rest.find('<') else {
+                self.text(rest);
+                break;
+            };
+            if lt > 0 {
+                self.text(&rest[..lt]);
+            }
+            rest = &rest[lt..];
+            let Some(gt) = rest.find('>') else {
+                self.html_pending = rest.to_string();
+                break;
+            };
+            self.html_tag(&rest[..=gt]);
+            rest = &rest[gt + 1..];
+        }
+    }
+
+    /// 閉じないまま残ったHTMLを素のテキストで出す。
+    fn flush_html(&mut self) {
+        let rest = std::mem::take(&mut self.html_pending);
+        if !rest.is_empty() {
+            self.text(&rest);
+        }
+    }
+
+    fn html_tag(&mut self, tag: &str) {
+        let Some((name, attrs)) = parse_tag(tag) else {
+            self.text(tag);
+            return;
+        };
+        let attr = |key: &str| {
+            attrs
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        if name == "img"
+            && let Some(src) = attr("src").filter(|s| !s.trim().is_empty())
+        {
+            let size = ImageSize {
+                width: attr("width").and_then(Length::parse),
+                height: attr("height").and_then(Length::parse),
+            };
+            let src = src.trim().to_string();
+            let alt = attr("alt").unwrap_or("").trim();
+            let alt = if alt.is_empty() {
+                image_file_name(&src)
+            } else {
+                alt.to_string()
+            };
+            self.seal = self.leaf_len();
+            self.push_inline(Inline::plain(IMAGE_OPEN));
+            let from = self.leaf_len().saturating_sub(1);
+            self.seal = self.leaf_len();
+            self.push_inline(Inline::plain(alt));
+            self.seal = self.leaf_len();
+            self.push_inline(Inline::plain("]"));
+            self.seal = self.leaf_len();
+            self.leaf_images.push(LeafImage {
+                from,
+                to: self.leaf_len(),
+                src,
+                size,
+            });
+            return;
+        }
+        let body = name.strip_prefix('/').unwrap_or(&name);
+        if WRAPPER_TAGS.contains(&body) {
+            self.seal = self.leaf_len();
+            self.text(tag);
+            let at = self.leaf_len().saturating_sub(1);
+            self.seal = self.leaf_len();
+            self.leaf_wrappers.push(at);
+            return;
+        }
+        self.text(tag);
     }
 
     fn text(&mut self, text: &str) {
@@ -451,7 +679,9 @@ impl Builder {
     }
 
     fn close_leaf(&mut self) {
+        self.flush_html();
         let images = std::mem::take(&mut self.leaf_images);
+        let wrappers = std::mem::take(&mut self.leaf_wrappers);
         self.image = None;
         self.seal = 0;
         let Some(leaf) = self.leaf.take() else { return };
@@ -460,7 +690,7 @@ impl Builder {
                 if inlines.is_empty() {
                     return;
                 }
-                if let Some(blocks) = images_only(&inlines, &images) {
+                if let Some(blocks) = images_only(&inlines, &images, &wrappers) {
                     for block in blocks {
                         self.push_block(block);
                     }
@@ -625,7 +855,8 @@ mod tests {
             blocks[1],
             Block::Image {
                 src: "../../a/5-点と費用.png".into(),
-                alt: "5-点と費用.png".into()
+                alt: "5-点と費用.png".into(),
+                size: ImageSize::default(),
             }
         );
         // 2枚続けて書けば2つのブロック。リンクで囲っても画像として扱う
@@ -635,11 +866,13 @@ mod tests {
             vec![
                 Block::Image {
                     src: "a.png".into(),
-                    alt: "図 1".into()
+                    alt: "図 1".into(),
+                    size: ImageSize::default(),
                 },
                 Block::Image {
                     src: "b.png".into(),
-                    alt: "b.png".into()
+                    alt: "b.png".into(),
+                    size: ImageSize::default(),
                 },
             ]
         );
@@ -658,5 +891,92 @@ mod tests {
             panic!("{blocks:?}");
         };
         assert_eq!(text_of(&rows[0][0]), "[画像: x.png]");
+    }
+
+    #[test]
+    fn length_is_pixels_or_percent() {
+        assert_eq!(Length::parse("640"), Some(Length::Px(640)));
+        assert_eq!(Length::parse(" 640px "), Some(Length::Px(640)));
+        assert_eq!(Length::parse("50%"), Some(Length::Percent(50)));
+        assert_eq!(Length::parse("33.4%"), Some(Length::Percent(33)));
+        assert_eq!(Length::parse("0"), None);
+        assert_eq!(Length::parse("auto"), None);
+        assert_eq!(Length::parse("10em"), None);
+        assert_eq!(Length::Percent(50).of(800), 400);
+        assert_eq!(Length::Px(640).of(800), 640);
+    }
+
+    #[test]
+    fn img_tag_becomes_image_block_with_size() {
+        let blocks = parse(
+            "前\n\n<img src=\"図/a%20b.png\" width=\"640\" alt=\"画面 1\">\n\n後 <img src='c.png' WIDTH=50% height=200px/>\n",
+        );
+        assert_eq!(
+            blocks[1],
+            Block::Image {
+                src: "図/a%20b.png".into(),
+                alt: "画面 1".into(),
+                size: ImageSize {
+                    width: Some(Length::Px(640)),
+                    height: None,
+                },
+            }
+        );
+        // 文の途中のimgは文字のまま（代替テキストが無ければファイル名）
+        let Block::Paragraph(inlines) = &blocks[2] else {
+            panic!("{blocks:?}");
+        };
+        assert_eq!(text_of(inlines), "後 [画像: c.png]");
+        // 段落にimgだけなら、行の途中でも画像。大きさの指定が無ければ指定なし
+        let blocks = parse("text\n\n<img src=\"a.png\"> <img src=\"b.png\" height=\"120\">\n");
+        assert_eq!(
+            blocks[1..],
+            [
+                Block::Image {
+                    src: "a.png".into(),
+                    alt: "a.png".into(),
+                    size: ImageSize::default(),
+                },
+                Block::Image {
+                    src: "b.png".into(),
+                    alt: "b.png".into(),
+                    size: ImageSize {
+                        width: None,
+                        height: Some(Length::Px(120)),
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn img_tag_wrapped_in_html_or_split_over_lines() {
+        // 中央寄せのpやリンクで包んでも画像。タグが行をまたいでもよい
+        let blocks = parse(
+            "<p align=\"center\">\n  <a href=\"x\"><img\n    src=\"a.png\"\n    width=\"30%\"></a>\n</p>\n",
+        );
+        assert_eq!(
+            blocks,
+            vec![Block::Image {
+                src: "a.png".into(),
+                alt: "a.png".into(),
+                size: ImageSize {
+                    width: Some(Length::Percent(30)),
+                    height: None,
+                },
+            }]
+        );
+        // 画像の無いHTMLは今までどおり素のまま見せる
+        let blocks = parse("<div>\nこんにちは\n</div>\n");
+        let Block::Paragraph(inlines) = &blocks[0] else {
+            panic!("{blocks:?}");
+        };
+        assert_eq!(text_of(inlines), "<div>\nこんにちは\n</div>\n");
+        // srcの無いimgは消さずに素のまま
+        let blocks = parse("a <img alt=\"x\"> b\n");
+        let Block::Paragraph(inlines) = &blocks[0] else {
+            panic!("{blocks:?}");
+        };
+        assert_eq!(text_of(inlines), "a <img alt=\"x\"> b");
     }
 }

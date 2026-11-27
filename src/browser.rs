@@ -1122,7 +1122,10 @@ impl<'c> Browser<'c> {
         }
         let old = self.preview.take().filter(|p| p.path == entry.path);
         let scroll = old.as_ref().map_or(0, |p| p.scroll);
-        let mut store = old.map_or_else(|| InlineImages::new(&entry.path), |p| p.store);
+        let mut store = old.map_or_else(
+            || InlineImages::new(&entry.path, crate::viewer::image_max_width(self.config)),
+            |p| p.store,
+        );
         let (
             Rendered {
                 lines,
@@ -1132,8 +1135,8 @@ impl<'c> Browser<'c> {
                 ..
             },
             children,
-        ) = self.build_preview(&entry, width, &mut |src, avail| {
-            store.size(src, avail, rows)
+        ) = self.build_preview(&entry, width, &mut |src, want, avail| {
+            store.size(src, want, avail, rows)
         });
         // 描き直すと行の位置が変わるので、選択は捨てる
         self.drag.clear();

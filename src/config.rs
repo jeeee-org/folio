@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use ratatui::style::{Color, Modifier, Style};
 use serde::Deserialize;
 
+use crate::document::Length;
 use crate::highlight;
 use crate::render::Theme;
 
@@ -28,6 +29,9 @@ pub struct View {
     pub max_width: u16,
     /// 本文の左右の余白（桁）
     pub margin: u16,
+    /// マークダウンの中の画像のうち、大きさの指定が無いものの最大幅。
+    /// `"70%"`（表示欄の幅に対する割合）か`"640px"`（画素）。既定は`"100%"`
+    pub image_max_width: String,
 }
 
 impl Default for View {
@@ -35,7 +39,20 @@ impl Default for View {
         Self {
             max_width: 0,
             margin: 1,
+            image_max_width: "100%".into(),
         }
+    }
+}
+
+impl View {
+    /// `image_max_width`を長さにする。読めなければエラー。
+    pub fn image_max_width(&self) -> Result<Length> {
+        Length::parse(&self.image_max_width).ok_or_else(|| {
+            anyhow!(
+                "view.image_max_width = \"{}\" を長さとして解釈できません（\"70%\"・\"640px\"）",
+                self.image_max_width
+            )
+        })
     }
 }
 
@@ -126,6 +143,10 @@ impl Config {
         config
             .theme()
             .with_context(|| format!("{}の色指定が不正です", path.display()))?;
+        config
+            .view
+            .image_max_width()
+            .with_context(|| format!("{}の設定が不正です", path.display()))?;
         Ok(config)
     }
 
@@ -197,6 +218,21 @@ mod tests {
         // 1色しか無ければ全レベルに繰り返す
         assert_eq!(theme.heading[5].fg, Some(Color::Red));
         assert_eq!(theme.code_block.bg, Some(Color::Indexed(236)));
+    }
+
+    #[test]
+    fn image_max_width() {
+        assert_eq!(
+            Config::default().view.image_max_width().unwrap(),
+            Length::Percent(100)
+        );
+        let c = Config::parse("[view]\nimage_max_width = \"70%\"\n").unwrap();
+        assert_eq!(c.view.image_max_width().unwrap(), Length::Percent(70));
+        let c = Config::parse("[view]\nimage_max_width = \"640px\"\n").unwrap();
+        assert_eq!(c.view.image_max_width().unwrap(), Length::Px(640));
+        let c = Config::parse("[view]\nimage_max_width = \"wide\"\n").unwrap();
+        let err = c.view.image_max_width().unwrap_err().to_string();
+        assert!(err.contains("view.image_max_width"), "{err}");
     }
 
     #[test]

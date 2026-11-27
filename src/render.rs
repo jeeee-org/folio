@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::document::{Align, Block, Inline, InlineStyle, ListItem};
+use crate::document::{Align, Block, ImageSize, Inline, InlineStyle, ListItem};
 use crate::highlight::Highlighter;
 
 /// 配色。P1ではハードコード（設定ファイルはバックログ）。
@@ -85,8 +85,9 @@ pub struct ImageSlot {
     pub src: String,
 }
 
-/// 画像の`src`と使える桁数から、描く大きさ（桁・行）を返す。描けなければ`None`（文字で出す）。
-pub type ImageSizer<'a> = dyn FnMut(&str, usize) -> Option<(u16, u16)> + 'a;
+/// 画像の`src`・大きさの指定と使える桁数から、描く大きさ（桁・行）を返す。
+/// 描けなければ`None`（文字で出す）。
+pub type ImageSizer<'a> = dyn FnMut(&str, ImageSize, usize) -> Option<(u16, u16)> + 'a;
 
 /// 描画後の表1つの位置。行は`Rendered::lines`の添字、桁は行頭からの表示幅。
 #[derive(Debug, Clone, Default)]
@@ -367,17 +368,17 @@ impl Renderer<'_, '_> {
                 header,
                 rows,
             } => self.table(aligns, header, rows, prefix),
-            Block::Image { src, alt } => self.image(src, alt, prefix),
+            Block::Image { src, alt, size } => self.image(src, alt, *size, prefix),
         }
     }
 
     /// 画像。描けるなら大きさの分だけ行を空け、描けなければ`[画像: 代替テキスト]`の文字で出す。
-    fn image(&mut self, src: &str, alt: &str, prefix: &Prefix) {
+    fn image(&mut self, src: &str, alt: &str, want: ImageSize, prefix: &Prefix) {
         let avail = self.avail(prefix);
         let size = self
             .sizer
             .as_mut()
-            .and_then(|f| f(src, avail))
+            .and_then(|f| f(src, want, avail))
             .filter(|&(w, h)| w > 0 && h > 0);
         let Some((width, height)) = size else {
             let text = format!("{}{alt}]", crate::document::IMAGE_OPEN);
@@ -1133,7 +1134,7 @@ mod tests {
             &theme,
             None,
             &Options::default(),
-            &mut |src, avail| {
+            &mut |src, _, avail| {
                 asked.push((src.to_string(), avail));
                 (src == "a.png").then_some((10, 3))
             },
@@ -1168,6 +1169,27 @@ mod tests {
     }
 
     #[test]
+    fn img_tag_size_is_passed_to_the_sizer() {
+        let blocks = crate::document::parse("<img src=\"a.png\" width=\"50%\">\n");
+        let mut asked = None;
+        render_with_images(
+            &blocks,
+            40,
+            &Theme::default(),
+            None,
+            &Options::default(),
+            &mut |_, want, _| {
+                asked = Some(want);
+                None
+            },
+        );
+        assert_eq!(
+            asked.unwrap().width,
+            Some(crate::document::Length::Percent(50))
+        );
+    }
+
+    #[test]
     fn trailing_image_lines_are_kept() {
         let blocks = crate::document::parse("![](a.png)\n");
         let r = render_with_images(
@@ -1176,7 +1198,7 @@ mod tests {
             &Theme::default(),
             None,
             &Options::default(),
-            &mut |_, _| Some((5, 4)),
+            &mut |_, _, _| Some((5, 4)),
         );
         assert_eq!(r.lines.len(), 4);
     }

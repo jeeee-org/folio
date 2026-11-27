@@ -22,6 +22,7 @@ use ratatui_image::protocol::Protocol;
 use ratatui_image::sliced::{SignedPosition, SlicedImage, SlicedProtocol};
 use resvg::usvg;
 
+use crate::document::{ImageSize, Length};
 use crate::format::Format;
 use crate::render::ImageSlot;
 
@@ -216,11 +217,13 @@ pub struct InlineImages {
     dims: HashMap<String, Option<(u32, u32)>>,
     /// 描いたもの（`src`・大きさ・結果）。新しいものほど後ろ
     drawn: Vec<(String, Size, Result<SlicedProtocol, String>)>,
+    /// 大きさの指定が無い画像の最大幅（設定の`view.image_max_width`）
+    default_width: Length,
 }
 
 impl InlineImages {
-    /// `doc`はmdファイルのパス。
-    pub fn new(doc: &Path) -> Self {
+    /// `doc`はmdファイルのパス。`default_width`は大きさの指定が無い画像の最大幅。
+    pub fn new(doc: &Path, default_width: Length) -> Self {
         let base = doc
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -230,6 +233,7 @@ impl InlineImages {
             base,
             dims: HashMap::new(),
             drawn: Vec::new(),
+            default_width,
         }
     }
 
@@ -239,14 +243,22 @@ impl InlineImages {
         self.drawn.clear();
     }
 
-    /// `src`を描く大きさ（桁・行）。`avail`桁・`max_rows`行に収め、元の画素より大きくしない。
-    /// 読めない画像は`None`。
-    pub fn size(&mut self, src: &str, avail: usize, max_rows: u16) -> Option<(u16, u16)> {
+    /// `src`を描く大きさ（桁・行）。指定`want`（無ければ既定の最大幅）に合わせ、
+    /// `avail`桁・`max_rows`行に収める。読めない画像は`None`。
+    pub fn size(
+        &mut self,
+        src: &str,
+        want: ImageSize,
+        avail: usize,
+        max_rows: u16,
+    ) -> Option<(u16, u16)> {
         let (w, h) = self.dimensions(src)?;
         let font = picker().font_size();
         cell_size(
             (w, h),
             (u32::from(font.width), u32::from(font.height)),
+            want,
+            self.default_width,
             avail,
             max_rows,
         )
@@ -274,9 +286,25 @@ impl InlineImages {
             let entry = self.entry(&slot.src, size, || {
                 let path =
                     resolve_image(&base, &slot.src).ok_or_else(|| "見つかりません".to_string())?;
+                let font = picker().font_size();
+                // 元の大きさで収まる桁数より広い場所なら、指定で拡大されている
+                let natural = image_dimensions(&path).and_then(|d| {
+                    cell_size(
+                        d,
+                        (u32::from(font.width), u32::from(font.height)),
+                        ImageSize::default(),
+                        Length::Percent(100),
+                        usize::from(slot.width),
+                        slot.height,
+                    )
+                });
+                let resize = if natural.is_some_and(|n| n != (slot.width, slot.height)) {
+                    Resize::Scale(Some(FilterType::Triangle))
+                } else {
+                    Resize::Fit(Some(FilterType::Triangle))
+                };
                 let img = if is_svg(&path) {
                     load_svg(&path).and_then(|tree| {
-                        let font = picker().font_size();
                         let size = tree.size();
                         let (pw, ph) = fit(
                             f64::from(size.width()),
@@ -290,13 +318,8 @@ impl InlineImages {
                     load_image(&path)
                 }
                 .map_err(|e| format!("{e:#}"))?;
-                SlicedProtocol::new_with_resize(
-                    picker(),
-                    img,
-                    size,
-                    Resize::Fit(Some(FilterType::Triangle)),
-                )
-                .map_err(|e| format!("画像にできません: {e}"))
+                SlicedProtocol::new_with_resize(picker(), img, size, resize)
+                    .map_err(|e| format!("画像にできません: {e}"))
             });
             let y = slot.line as i64 - scroll as i64;
             match entry {
@@ -343,11 +366,15 @@ impl InlineImages {
     }
 }
 
-/// 画素`(w, h)`の画像を、文字の大きさ`font`（画素）で`avail`桁・`max_rows`行に収める桁数・行数。
-/// 元の画素より大きくはしない。
+/// 画素`(w, h)`の画像を、文字の大きさ`font`（画素）で描く桁数・行数。
+/// 幅・高さの指定`want`があればその画素（%は表示欄の幅に対する割合。高さの%は効かない）にし、
+/// 縦横比は保つ（両方あればその枠に収める）。指定が無ければ元の画素の大きさで、
+/// `default_width`より広ければそこまで縮める。どちらも最後に`avail`桁・`max_rows`行に収める。
 fn cell_size(
     (w, h): (u32, u32),
     (fw, fh): (u32, u32),
+    want: ImageSize,
+    default_width: Length,
     avail: usize,
     max_rows: u16,
 ) -> Option<(u16, u16)> {
@@ -356,10 +383,32 @@ fn cell_size(
     }
     let max_w = (avail as u32).min(u32::from(u16::MAX)) * fw;
     let max_h = u32::from(max_rows) * fh;
-    let (pw, ph) = if w <= max_w && h <= max_h {
-        (w, h)
+    let (w, h) = (f64::from(w), f64::from(h));
+    let want_w = want.width.map(|l| f64::from(l.of(max_w).max(1)));
+    let want_h = want
+        .height
+        .filter(|l| matches!(l, Length::Px(_)))
+        .map(|l| f64::from(l.of(max_h).max(1)));
+    let (tw, th) = match (want_w, want_h) {
+        (Some(ww), Some(wh)) => {
+            let scale = (ww / w).min(wh / h);
+            (w * scale, h * scale)
+        }
+        (Some(ww), None) => (ww, h * ww / w),
+        (None, Some(wh)) => (w * wh / h, wh),
+        (None, None) => {
+            let limit = f64::from(default_width.of(max_w).max(1));
+            if w <= limit {
+                (w, h)
+            } else {
+                (limit, h * limit / w)
+            }
+        }
+    };
+    let (pw, ph) = if tw <= f64::from(max_w) && th <= f64::from(max_h) {
+        ((tw.round() as u32).max(1), (th.round() as u32).max(1))
     } else {
-        fit(f64::from(w), f64::from(h), max_w, max_h)
+        fit(tw, th, max_w, max_h)
     };
     let cols = pw.div_ceil(fw).clamp(1, avail as u32);
     let rows = ph.div_ceil(fh).clamp(1, u32::from(max_rows));
@@ -799,12 +848,115 @@ mod tests {
     fn inline_image_size_fits_width_and_height_without_enlarging() {
         // 文字は10×20画素とする
         // 小さい画像は元の大きさ（端数は切り上げ）
-        assert_eq!(cell_size((95, 41), (10, 20), 80, 30), Some((10, 3)));
+        let none = ImageSize::default();
+        let all = Length::Percent(100);
+        assert_eq!(
+            cell_size((95, 41), (10, 20), none, all, 80, 30),
+            Some((10, 3))
+        );
         // 幅で縮める
-        assert_eq!(cell_size((1600, 400), (10, 20), 80, 30), Some((80, 10)));
+        assert_eq!(
+            cell_size((1600, 400), (10, 20), none, all, 80, 30),
+            Some((80, 10))
+        );
         // 高さで縮める
-        assert_eq!(cell_size((400, 2000), (10, 20), 80, 25), Some((10, 25)));
-        assert_eq!(cell_size((400, 2000), (10, 20), 80, 0), None);
+        assert_eq!(
+            cell_size((400, 2000), (10, 20), none, all, 80, 25),
+            Some((10, 25))
+        );
+        assert_eq!(cell_size((400, 2000), (10, 20), none, all, 80, 0), None);
+    }
+
+    #[test]
+    fn inline_image_size_follows_the_width_and_height() {
+        // 文字は10×20画素、表示欄は80桁（800画素）×30行（600画素）とする
+        let font = (10, 20);
+        let all = Length::Percent(100);
+        let size = |w, h| ImageSize {
+            width: w,
+            height: h,
+        };
+        // 幅を画素で: 1600×1000のスクショを640画素に。縦横比を保つ
+        let px640 = size(Some(Length::Px(640)), None);
+        assert_eq!(
+            cell_size((1600, 1000), font, px640, all, 80, 30),
+            Some((64, 20))
+        );
+        // 指定があれば元より大きくもする（320×200を640画素に）
+        assert_eq!(
+            cell_size((320, 200), font, px640, all, 80, 30),
+            Some((64, 20))
+        );
+        // 幅を割合で: 表示欄の50%＝400画素
+        let half = size(Some(Length::Percent(50)), None);
+        assert_eq!(
+            cell_size((1600, 1000), font, half, all, 80, 30),
+            Some((40, 13))
+        );
+        // 高さだけ: 200画素の高さに合わせて幅を決める
+        let h200 = size(None, Some(Length::Px(200)));
+        assert_eq!(
+            cell_size((1600, 1000), font, h200, all, 80, 30),
+            Some((32, 10))
+        );
+        // 両方: その枠に縦横比を保って収める（幅640・高さ200なら高さで決まる）
+        let both = size(Some(Length::Px(640)), Some(Length::Px(200)));
+        assert_eq!(
+            cell_size((1600, 1000), font, both, all, 80, 30),
+            Some((32, 10))
+        );
+        // 高さの%は効かない（幅の指定だけで決まる）
+        let pct_h = size(Some(Length::Px(640)), Some(Length::Percent(10)));
+        assert_eq!(
+            cell_size((1600, 1000), font, pct_h, all, 80, 30),
+            Some((64, 20))
+        );
+        // 表示欄より大きい指定は欄に収める（幅3000画素→800画素、高さ30行が先に効く）
+        let huge = size(Some(Length::Px(3000)), None);
+        assert_eq!(
+            cell_size((1600, 400), font, huge, all, 80, 30),
+            Some((80, 10))
+        );
+        assert_eq!(
+            cell_size((1600, 1000), font, huge, all, 80, 30),
+            Some((80, 25))
+        );
+        let over = size(Some(Length::Percent(150)), None);
+        assert_eq!(
+            cell_size((1600, 400), font, over, all, 80, 30),
+            Some((80, 10))
+        );
+    }
+
+    #[test]
+    fn inline_image_default_width_applies_only_without_size() {
+        let font = (10, 20);
+        let none = ImageSize::default();
+        // 既定の最大幅70%＝560画素。1600×1000は560×350に縮める
+        let seventy = Length::Percent(70);
+        assert_eq!(
+            cell_size((1600, 1000), font, none, seventy, 80, 30),
+            Some((56, 18))
+        );
+        // 既定より小さい画像は元の大きさのまま（広げない）
+        assert_eq!(
+            cell_size((300, 100), font, none, seventy, 80, 30),
+            Some((30, 5))
+        );
+        // 画素でも書ける
+        assert_eq!(
+            cell_size((1600, 1000), font, none, Length::Px(400), 80, 30),
+            Some((40, 13))
+        );
+        // 指定のある画像には効かない
+        let px640 = ImageSize {
+            width: Some(Length::Px(640)),
+            height: None,
+        };
+        assert_eq!(
+            cell_size((1600, 1000), font, px640, seventy, 80, 30),
+            Some((64, 20))
+        );
     }
 
     #[test]
@@ -817,7 +969,7 @@ mod tests {
         let png = figs.join("5-点と費用.png");
         DynamicImage::new_rgb8(30, 20).save(&png).unwrap();
         let doc = docs.join("a.md");
-        let images = InlineImages::new(&doc);
+        let images = InlineImages::new(&doc, Length::Percent(100));
         let found = resolve_image(&images.base, "../../trials/fig a/5-点と費用.png");
         assert_eq!(
             found.map(|p| p.canonicalize().unwrap()),
@@ -841,7 +993,10 @@ mod tests {
             Some((30, 20))
         );
         // 相対パスのmdファイル名（フォルダが空）でも今のフォルダから探す
-        assert_eq!(InlineImages::new(Path::new("a.md")).base, Path::new("."));
+        assert_eq!(
+            InlineImages::new(Path::new("a.md"), Length::Percent(100)).base,
+            Path::new(".")
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
