@@ -436,6 +436,9 @@ impl<'c> Browser<'c> {
         while !self.quit {
             if dirty {
                 terminal.draw(|frame| self.draw(frame))?;
+                if let Some(vp) = self.visual_preview.as_mut() {
+                    vp.wheel.settle(Instant::now());
+                }
             }
             dirty = match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {

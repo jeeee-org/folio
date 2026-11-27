@@ -112,10 +112,14 @@ pub fn moved(page: usize, count: usize, m: Move) -> usize {
 /// ホイールの1回の操作でめくりすぎないための関所。トラックパッドや慣性のあるホイールは
 /// 1回の操作で信号を何十も送るので、信号ごとにめくると最初か最後のページまで飛んでしまう。
 /// 間を置いて始めた操作の最初の信号で1枚めくり、回し続けている間は`REPEAT`ごとに1枚にする。
+/// めくった後は、描き終えた時に`settle`を呼ぶ。描くのに時間がかかると、その間に届いて溜まった
+/// 信号が描き終えた後で一度に読まれ、どれも「間を置いた新しい操作」に見えてしまうため。
 #[derive(Debug, Default)]
 pub struct WheelGate {
     last_event: Option<Instant>,
     last_flip: Option<Instant>,
+    /// めくった後、まだ`settle`していない
+    flipped: bool,
 }
 
 impl WheelGate {
@@ -135,8 +139,18 @@ impl WheelGate {
         self.last_event = Some(now);
         if fresh || repeat {
             self.last_flip = Some(now);
+            self.flipped = true;
         }
         fresh || repeat
+    }
+
+    /// めくったページを描き終えた（`now`）。描いている間に溜まった信号を同じ操作の続きとみなし、
+    /// 間隔は描き終えた時から数える。めくっていなければ何もしない。
+    pub fn settle(&mut self, now: Instant) {
+        if std::mem::take(&mut self.flipped) {
+            self.last_event = Some(now);
+            self.last_flip = Some(now);
+        }
     }
 }
 
@@ -164,6 +178,7 @@ pub fn run(
                 })?;
             }
             terminal.draw(|f| draw(f, visual, name, *page, message.as_deref(), can_text))?;
+            wheel.settle(Instant::now());
         }
         dirty = true;
         let step = match event::read()? {
@@ -350,5 +365,22 @@ mod tests {
         assert!(!gate.accept(ms(520)));
         // 手を止めて250ms以上空けた次の操作は、すぐ1枚
         assert!(gate.accept(ms(800)));
+    }
+
+    #[test]
+    fn wheel_signals_queued_during_slow_draw_do_not_flip() {
+        let mut gate = WheelGate::default();
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        // 1枚めくり、そのページを描くのに800msかかった
+        assert!(gate.accept(ms(0)));
+        gate.settle(ms(800));
+        // 描いている間に溜まった信号は、描き終えた直後に続けて読まれる。どれもめくらない
+        for n in 0..10 {
+            assert!(!gate.accept(ms(800 + n)), "{n}");
+        }
+        // めくっていない時の`settle`（他の描き直し）は間隔を変えない
+        gate.settle(ms(1200));
+        assert!(gate.accept(ms(1300)));
     }
 }
